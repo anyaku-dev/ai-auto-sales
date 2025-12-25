@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Next.js 14.1.0 では、この書き方が正解です
+  // タイムアウト設定を延長（Vercel Proなどを使う場合用）
+  maxDuration: 60,
+  
+  // ライブラリのバンドル設定（ここが重要！）
   experimental: {
     serverComponentsExternalPackages: ['playwright-core', '@sparticuz/chromium'],
   },
