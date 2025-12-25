@@ -101,7 +101,6 @@ export default function DashboardPage() {
     }
     if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') Notification.requestPermission();
     
-    // 自動更新（ポーリング）: 3秒ごとに最新状態をチェック
     const pollInterval = setInterval(() => {
         const currentUser = user || (localStorage.getItem('currentUser') ? JSON.parse(localStorage.getItem('currentUser')!) : null);
         if (currentUser?.userId) {
@@ -109,7 +108,6 @@ export default function DashboardPage() {
         }
     }, 3000);
 
-    // 経過時間タイマー
     intervalRef.current = setInterval(() => {
       setTimers(prev => {
         const next = { ...prev };
@@ -143,7 +141,6 @@ export default function DashboardPage() {
     }
   }, [isAiGenerating, isAnalyzingCsv]);
 
-  // プログレスバーアニメーション
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isAiGenerating || isAnalyzingCsv) {
@@ -183,7 +180,7 @@ export default function DashboardPage() {
     const { data } = await supabase.from('targets')
       .select('*')
       .eq('owner_id', userId)
-      .eq('is_archived', false)
+      .eq('is_archived', false) // アーカイブ済みは取得しない
       .order('created_at', { ascending: false });
     
     if (data) {
@@ -221,32 +218,24 @@ export default function DashboardPage() {
       });
 
       const result = Object.values(grouped).map(group => {
-         // ★修正ポイント: 判定ロジックを強化
+         const total = group.total || group.targets.length || 1;
          
-         // 1. アクティブなタスク（まだ終わっていないもの）があるか？
          const hasActiveTasks = group.targets.some(t => 
             t.status === 'pending' || t.status === 'queued' || t.status === 'processing'
          );
-
-         // 2. 全てが「pending（未着手）」の状態か？
          const isAllPending = group.targets.every(t => t.status === 'pending');
 
          let status: "sending" | "completed" | "pending" = "pending";
          
+         // 完了判定ロジック
          if (!hasActiveTasks && group.processed > 0) {
-             // アクティブなものがなく、かつ1つでも処理済みなら「完了」とみなす
-             // (total数と合わなくても完了とする)
              status = "completed";
          } else if (hasActiveTasks && !isAllPending) {
-             // アクティブなものがあり、かつ全てが未着手でないなら「送信中」
              status = "sending";
          } else {
-             // それ以外（全て未着手、または空）は待機中
              status = "pending";
          }
 
-         // 進捗率の計算（完了なら強制100%）
-         const total = group.total || group.targets.length || 1;
          const progress = status === 'completed' ? 100 : Math.round((group.processed / total) * 100);
 
          return { ...group, total, progress, status };
@@ -309,6 +298,7 @@ export default function DashboardPage() {
   const handleArchive = async (packageName: string) => {
     if(!confirm("このレポートをダッシュボードから削除しますか？\n（データ自体は消えません）")) return;
 
+    // ★重要: is_archived を true にすることで、fetchPackageStatusで取得されなくなる
     await supabase
       .from("targets")
       .update({ is_archived: true })
@@ -383,7 +373,7 @@ export default function DashboardPage() {
         
         if (result.success) {
             queuedCount++;
-            if (user) fetchPackageStatus(user.userId); // 即座に反映
+            if (user) fetchPackageStatus(user.userId);
         }
 
         if (result.message && result.message.includes('ありません')) break; 
@@ -539,10 +529,11 @@ export default function DashboardPage() {
           'border-indigo-200 ring-1 ring-indigo-50'
         }`}>
          
+         {/* ★修正: 閉じるボタンのアクションを handleArchive に変更し、DBから消すようにした */}
          {(isCompleted || isPending) && (
            <button 
-             onClick={() => handleRemoveFromQueue(pkg.package_name)} 
-             className="absolute top-3 right-3 text-gray-400 hover:text-red-500 bg-white/80 hover:bg-white p-1 rounded-full transition-colors"
+             onClick={() => handleArchive(pkg.package_name)} 
+             className="absolute top-3 right-3 text-gray-400 hover:text-red-500 bg-white/80 hover:bg-white p-1 rounded-full transition-colors z-10" // z-10を追加
              title="一覧から削除"
            >
              <X size={20} />
@@ -593,7 +584,8 @@ export default function DashboardPage() {
                </div>
             </div>
 
-            <div className="ml-4 pl-4 border-l border-slate-100 flex flex-col items-end gap-2 shrink-0">
+            {/* ★修正: pr-8 (右パディング) を追加して、右上のバッテンと被らないようにした */}
+            <div className="ml-4 pl-4 border-l border-slate-100 flex flex-col items-end gap-2 shrink-0 pr-8">
               <div className="text-xs text-slate-400">Action</div>
               {isCompleted ? (
                 <button 
@@ -634,8 +626,6 @@ export default function DashboardPage() {
        </div>
     </div>
   );
-
-  // --- Main Render ---
 
   return (
     <div className="max-w-7xl mx-auto pb-20 relative font-sans">
