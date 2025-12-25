@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 import { OpenAI } from 'openai';
-// ★変更点: jsdomをやめて、軽量なcheerioを使用
-import { load } from 'cheerio';
+// ★変更点: node-html-parser を使用
+import { parse } from 'node-html-parser';
 
 export const maxDuration = 60; 
+// Vercelでの動的実行を強制
+export const dynamic = 'force-dynamic';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -16,23 +18,24 @@ export async function POST(req: Request) {
 
     if (!htmlContent) return NextResponse.json({ error: 'No content' }, { status: 400 });
 
-    // --- 【改善点】HTMLのダイエット処理 (Cheerio版) ---
+    // --- 【改善点】HTMLのダイエット処理 (node-html-parser版) ---
     try {
-      // HTMLを読み込む
-      const $ = load(htmlContent);
+      // HTMLをパース（解析）
+      const root = parse(htmlContent);
 
-      // 不要なタグ（script, style, svg, noscript, iframe）を一括削除
-      $('script, style, svg, noscript, iframe, link, meta').remove();
-      
-      // コメントアウトも削除（さらに軽量化）
-      $('*').contents().each(function() {
-          if (this.type === 'comment') $(this).remove();
+      // 不要なタグを一括削除
+      const tagsToRemove = ['script', 'style', 'svg', 'noscript', 'iframe', 'link', 'meta', 'header', 'footer'];
+      tagsToRemove.forEach(tag => {
+        const elements = root.querySelectorAll(tag);
+        elements.forEach(el => el.remove());
       });
 
-      // bodyの中身だけを取り出す（なければ全体）
-      const bodyContent = $('body').html();
-      if (bodyContent) {
-        htmlContent = bodyContent;
+      // HTMLを取得（bodyがあればbodyの中身、なければ全体）
+      const bodyEl = root.querySelector('body');
+      if (bodyEl) {
+        htmlContent = bodyEl.innerHTML;
+      } else {
+        htmlContent = root.innerHTML;
       }
     } catch (e) {
       console.log("HTML parsing error, using raw content");
