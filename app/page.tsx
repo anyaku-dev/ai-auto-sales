@@ -1,13 +1,40 @@
 'use client';
+
 import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+// ★修正箇所: 正しいインポート文に直しました
+import { X, FileText, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
+
+type Target = {
+  id: string;
+  company_name: string;
+  status: "pending" | "processing" | "completed" | "error";
+  package_name: string;
+  result_log: string;
+  url: string;
+  industry?: string;
+  location?: string;
+  created_at: string;
+};
+
+type QueueGroup = {
+  package_name: string;
+  total: number;
+  processed: number;
+  success: number;
+  error: number;
+  status: "sending" | "completed";
+  targets: Target[];
+  progress: number;
+  industry: string;
+};
 
 type TimerData = { startTime: number; elapsed: string; };
 
@@ -16,7 +43,7 @@ export default function DashboardPage() {
   const [user, setUser] = useState<any>(null);
   
   const [profiles, setProfiles] = useState<any[]>([]);
-  const [packages, setPackages] = useState<any[]>([]);
+  const [packages, setPackages] = useState<QueueGroup[]>([]);
   const [totalSentCount, setTotalSentCount] = useState(0);
   const [notifications, setNotifications] = useState<any[]>([]);
 
@@ -24,9 +51,11 @@ export default function DashboardPage() {
   const [runningPackages, setRunningPackages] = useState<{[key: string]: boolean}>({});
   const [timers, setTimers] = useState<{[key: string]: TimerData}>({});
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const [visibleQueueNames, setVisibleQueueNames] = useState<string[]>([]);
+  
+  const [manualQueueNames, setManualQueueNames] = useState<string[]>([]);
+  const [selectedReport, setSelectedReport] = useState<QueueGroup | null>(null);
 
-  // モーダル・AI関連
+  // Modal States
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [targetPackageForModal, setTargetPackageForModal] = useState<any>(null);
   const [editingProfile, setEditingProfile] = useState<any>(null);
@@ -41,7 +70,6 @@ export default function DashboardPage() {
   const [loadingText, setLoadingText] = useState('INITIALIZING...');
   const [progress, setProgress] = useState(0);
 
-  // 新機能用ステート
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -56,8 +84,9 @@ export default function DashboardPage() {
       setUser(u);
       loadAllData(u.userId);
       fetchNotifications(u.userId);
-      const savedQueues = localStorage.getItem('visibleQueueNames');
-      if (savedQueues) setVisibleQueueNames(JSON.parse(savedQueues));
+      
+      const savedQueues = localStorage.getItem('manualQueueNames');
+      if (savedQueues) setManualQueueNames(JSON.parse(savedQueues));
     }
     if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') Notification.requestPermission();
     
@@ -78,7 +107,6 @@ export default function DashboardPage() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [runningPackages]);
 
-  // AI Animation Logic
   useEffect(() => {
     if (isAiGenerating || isAnalyzingCsv) {
       const texts = isAnalyzingCsv 
@@ -125,101 +153,118 @@ export default function DashboardPage() {
 
   const fetchPackageStatus = async (userId: string) => {
     const { data } = await supabase.from('targets')
-      .select('package_name, status, industry, location, total_count, completed_at')
-      .eq('owner_id', userId);
+      .select('*')
+      .eq('owner_id', userId)
+      .eq('is_archived', false)
+      .order('created_at', { ascending: false });
     
     if (data) {
-      let totalSent = 0;
-      const grouped: any = {};
+      let totalSentGlobal = 0;
+      const grouped: { [key: string]: QueueGroup } = {};
       
       data.forEach((item: any) => {
         const name = item.package_name || '未分類';
+        
         if (!grouped[name]) {
           grouped[name] = { 
-            totalCountMaster: item.total_count || 0,
-            pending: 0, completed: 0, error: 0, 
-            industry: item.industry || '', location: item.location || '',
-            lastCompletedAt: null
+            package_name: name,
+            total: 0, 
+            processed: 0,
+            success: 0, 
+            error: 0, 
+            status: 'sending',
+            targets: [],
+            progress: 0,
+            industry: item.industry || ''
           };
         }
+        
+        grouped[name].targets.push(item);
+        if(item.total_count) grouped[name].total = item.total_count;
+
         if (item.status === 'completed') { 
-            grouped[name].completed += 1; 
-            totalSent += 1;
-            if (item.completed_at) {
-                const currentLast = grouped[name].lastCompletedAt ? new Date(grouped[name].lastCompletedAt).getTime() : 0;
-                if (new Date(item.completed_at).getTime() > currentLast) grouped[name].lastCompletedAt = item.completed_at;
-            }
+            grouped[name].processed += 1;
+            grouped[name].success += 1; 
+            totalSentGlobal += 1;
+        } else if (item.status === 'error') {
+            grouped[name].processed += 1;
+            grouped[name].error += 1;
         }
-        if (item.status === 'error') grouped[name].error += 1;
-        if (item.status === 'pending' || item.status === 'processing') grouped[name].pending += 1;
       });
-      setTotalSentCount(totalSent);
-      const result = Object.keys(grouped).map(name => {
-        const g = grouped[name];
-        const progress = g.totalCountMaster > 0 ? Math.round(((g.completed + g.error) / g.totalCountMaster) * 100) : 0;
-        return { name, ...g, progress };
+
+      const result = Object.values(grouped).map(group => {
+         const total = group.total || group.targets.length || 1;
+         
+         // ★★★ ロジック修正ポイント ★★★
+         // 「未処理(pending)」や「処理中(processing)」のタスクが1つも残っていなければ「完了」とみなす
+         // (数字がズレていても、残タスクがなければ完了にする強力なロジック)
+         const hasActiveTasks = group.targets.some(t => t.status === 'pending' || t.status === 'processing');
+         
+         const status = !hasActiveTasks ? 'completed' : 'sending';
+         
+         // 完了なら強制的に100%表示にする（見た目を整える）
+         const progress = status === 'completed' ? 100 : Math.round((group.processed / total) * 100);
+
+         return { ...group, total, progress, status };
       });
+
+      setTotalSentCount(totalSentGlobal);
       setPackages(result);
     }
   };
 
   const currentProfile = profiles.find(p => p.id === selectedProfileId);
 
-  // --- セクション分け ---
-  const queuePackages = packages.filter(p => visibleQueueNames.includes(p.name));
+  // キュー表示: 進捗があるか、手動追加されたもの
+  const queuePackages = packages.filter(p => p.progress > 0 || manualQueueNames.includes(p.package_name));
 
   const recommendedPackages = packages
-    .filter(p => p.progress === 0 && !visibleQueueNames.includes(p.name) && !uploadedPackageNames.includes(p.name))
-    .map(p => {
-      let score = 0;
-      if (currentProfile?.analyzed_industry_tags && p.industry) {
-        const profileTags = currentProfile.analyzed_industry_tags.split(',').map((t:string)=>t.trim().toLowerCase());
-        const packageTags = p.industry.split(',').map((t:string)=>t.trim().toLowerCase());
-        score = profileTags.filter((t:string) => packageTags.includes(t)).length;
-      }
-      return { ...p, score };
-    })
-    .sort((a, b) => b.score - a.score)
+    .filter(p => p.progress === 0 && !manualQueueNames.includes(p.package_name) && !uploadedPackageNames.includes(p.package_name))
+    .sort((a, b) => b.total - a.total)
     .slice(0, 6);
 
-  const uploadedPackagesList = packages.filter(p => uploadedPackageNames.includes(p.name));
+  const uploadedPackagesList = packages.filter(p => uploadedPackageNames.includes(p.package_name));
 
   const searchResults = packages.filter(p => {
       if (!searchQuery) return false;
       const q = searchQuery.toLowerCase();
       return (
-          p.name.toLowerCase().includes(q) || 
-          p.industry.toLowerCase().includes(q) || 
-          p.location.toLowerCase().includes(q)
+          p.package_name.toLowerCase().includes(q) || 
+          (p.industry && p.industry.toLowerCase().includes(q))
       );
   });
 
-  // レコメンドタグ抽出
   const getRecommendTags = () => {
     const tags = new Set<string>();
     packages.forEach(p => {
         if(p.industry) p.industry.split(',').forEach((t:string) => tags.add(t.trim()));
-        if(p.location) p.location.split(',').forEach((t:string) => tags.add(t.trim()));
     });
     const list = Array.from(tags);
     return list.length > 0 ? list.slice(0, 6) : ['IT', 'SaaS', '不動産', '建設', '東京都', '大阪府'];
   };
 
-  // --- アクション ---
-
   const handleClickStart = (pkg: any) => {
     if (!currentProfile) return alert('商材を選択してください');
-    setTargetPackageForModal(pkg);
+    setTargetPackageForModal(pkg); 
     setEditingProfile(JSON.parse(JSON.stringify(currentProfile)));
     setIsEditingInModal(false);
     setIsConfirmModalOpen(true);
     setIsSearchModalOpen(false);
   };
 
-  const handleRemoveFromQueue = (pkgName: string) => {
-    const newQueue = visibleQueueNames.filter(name => name !== pkgName);
-    setVisibleQueueNames(newQueue);
-    localStorage.setItem('visibleQueueNames', JSON.stringify(newQueue));
+  const handleArchive = async (packageName: string) => {
+    if(!confirm("このレポートをダッシュボードから削除しますか？\n（データ自体は消えません）")) return;
+
+    await supabase
+      .from("targets")
+      .update({ is_archived: true })
+      .eq("package_name", packageName);
+
+    const newManual = manualQueueNames.filter(n => n !== packageName);
+    setManualQueueNames(newManual);
+    localStorage.setItem('manualQueueNames', JSON.stringify(newManual));
+
+    loadAllData(user.userId);
   };
 
   const handleStartEditInModal = () => setIsEditingInModal(true);
@@ -244,12 +289,14 @@ export default function DashboardPage() {
   const handleConfirmAndRun = async () => {
     if (!targetPackageForModal || !selectedProfileId) return;
     setIsConfirmModalOpen(false);
-    const pkgName = targetPackageForModal.name;
-    if (!visibleQueueNames.includes(pkgName)) {
-      const newQueue = [pkgName, ...visibleQueueNames];
-      setVisibleQueueNames(newQueue);
-      localStorage.setItem('visibleQueueNames', JSON.stringify(newQueue));
+    const pkgName = targetPackageForModal.package_name;
+    
+    if (!manualQueueNames.includes(pkgName)) {
+      const newQueue = [pkgName, ...manualQueueNames];
+      setManualQueueNames(newQueue);
+      localStorage.setItem('manualQueueNames', JSON.stringify(newQueue));
     }
+    
     setRunningPackages(prev => ({ ...prev, [pkgName]: true }));
     setTimers(prev => ({ ...prev, [pkgName]: { startTime: Date.now(), elapsed: '0m 0s' } }));
 
@@ -266,15 +313,20 @@ export default function DashboardPage() {
           body: JSON.stringify({ sender_profile_id: selectedProfileId, target_package_name: pkgName, owner_id: user.userId }),
         });
         const result = await res.json();
+        
         if (result.success) successCount++;
-        else if (result.success === false) errorCount++;
+        else if (result.success === false) errorCount++; 
+        
         fetchPackageStatus(user.userId);
-        if (result.message) break;
+
+        if (result.message === 'No jobs found') break; 
       } catch(e) { break; }
+      
       await new Promise(r => setTimeout(r, 2000));
     }
 
     setRunningPackages(prev => ({ ...prev, [pkgName]: false }));
+    
     await supabase.from('notifications').insert({ 
         owner_id: user.userId, 
         title: 'アプローチ完了のお知らせ', 
@@ -306,12 +358,10 @@ export default function DashboardPage() {
     setIsUploadModalOpen(false);
     setUploadFile(null);
     setUploadedPackageNames(prev => [newPkgName, ...prev]);
-    
     alert('解析が完了しました！\n「アップロードしたターゲットリスト」に追加されました。');
     loadAllData(user.userId);
   };
 
-  // AI Writer Actions
   const handleCloseRewriteModal = () => { if (rewriteStep === 'result' && generatedBody.length > 0) { if (!confirm('AIが生成した文章は保存されていません。\n反映せずに閉じてもよろしいですか？')) return; } setIsRewriteModalOpen(false); };
   const handleOpenRewriteModal = () => {
     if (editingProfile.message_body && editingProfile.message_body.length > 20) { setGeneratedBody(editingProfile.message_body); setRewriteStep('result'); setRefineInstruction(''); } else { setRewriteStep('input'); setRewriteInputs({ productName: editingProfile.profile_name || '', productUrl: editingProfile.sender_url || '', targetType:'', coreValue:'', goal:'' }); setGeneratedBody(''); }
@@ -337,21 +387,65 @@ export default function DashboardPage() {
     setIsRewriteModalOpen(false);
   };
 
-  // --- UI Components ---
-  const QueueCard = ({ pkg }: any) => {
-    const isCompleted = pkg.progress === 100;
+  const QueueCard = ({ pkg }: { pkg: QueueGroup }) => {
+    const isCompleted = pkg.status === 'completed';
     return (
-      <div className={`relative bg-white rounded-xl border p-6 flex items-center justify-between shadow-sm transition-all ${isCompleted ? 'border-emerald-200 bg-emerald-50/30' : 'border-indigo-200 ring-1 ring-indigo-50'}`}>
-         {isCompleted && <button onClick={() => handleRemoveFromQueue(pkg.name)} className="absolute top-2 right-2 text-xs font-bold text-slate-400 hover:text-slate-600 bg-white/50 hover:bg-white px-2 py-1 rounded transition">× 完了にする</button>}
-         <div className="flex items-center gap-6 flex-1">
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl shadow-inner ${isCompleted ? 'bg-emerald-100 text-emerald-600' : 'bg-indigo-100 text-indigo-600'}`}>{isCompleted ? '✓' : <span className="animate-spin">↻</span>}</div>
-            <div className="flex-1">
-               <div className="flex justify-between mb-1"><h4 className="font-bold text-slate-800">{pkg.name}</h4><span className={`text-xs font-bold px-2 py-0.5 rounded ${isCompleted ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700'}`}>{isCompleted ? 'COMPLETED' : 'SENDING...'}</span></div>
-               <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden"><div className={`h-full transition-all duration-1000 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${pkg.progress}%` }}></div></div>
-               <div className="flex justify-between text-xs text-slate-500 mt-1 font-mono"><span>Target: {pkg.totalCountMaster} companies</span><span>{pkg.progress}%</span></div>
+      <div className={`relative bg-white rounded-xl border p-6 shadow-sm transition-all ${isCompleted ? 'border-green-200 bg-green-50/30' : 'border-indigo-200 ring-1 ring-indigo-50'}`}>
+         
+         {isCompleted && (
+           <button 
+             onClick={() => handleArchive(pkg.package_name)} 
+             className="absolute top-3 right-3 text-gray-400 hover:text-red-500 bg-white/80 hover:bg-white p-1 rounded-full transition-colors"
+             title="一覧から削除"
+           >
+             <X size={20} />
+           </button>
+         )}
+
+         <div className="flex items-center gap-6">
+            <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl shadow-inner shrink-0 ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-indigo-100 text-indigo-600'}`}>
+               {isCompleted ? <CheckCircle size={24} /> : <Loader2 size={24} className="animate-spin" />}
+            </div>
+            
+            <div className="flex-1 min-w-0">
+               <div className="flex items-center gap-3 mb-1">
+                 <h4 className="font-bold text-slate-800 truncate">{pkg.package_name}</h4>
+                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${isCompleted ? 'bg-green-100 text-green-700' : 'bg-indigo-100 text-indigo-700'}`}>
+                    {isCompleted ? 'COMPLETED' : 'SENDING...'}
+                 </span>
+               </div>
+               
+               <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                 <div 
+                   className={`h-full transition-all duration-1000 ${isCompleted ? 'bg-green-500' : 'bg-indigo-500'}`} 
+                   style={{ width: `${pkg.progress}%` }}
+                 ></div>
+               </div>
+               
+               <div className="flex justify-between text-xs text-slate-500 mt-1 font-mono">
+                  <span>Target: {pkg.total} companies</span>
+                  <span className={pkg.error > 0 ? "text-red-500 font-bold" : ""}>
+                    {pkg.progress}% 
+                    {pkg.error > 0 && ` (Error: ${pkg.error})`}
+                  </span>
+               </div>
+            </div>
+
+            <div className="ml-4 pl-4 border-l border-slate-100 flex flex-col items-end gap-2 shrink-0">
+              <div className="text-xs text-slate-400">Action</div>
+              {isCompleted ? (
+                <button 
+                   onClick={() => setSelectedReport(pkg)}
+                   className="flex items-center gap-1 text-sm font-bold text-slate-600 bg-white border border-slate-300 px-3 py-1.5 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition shadow-sm"
+                >
+                  <FileText size={14} />
+                  詳細
+                </button>
+              ) : (
+                <div className="text-sm font-bold text-indigo-600 animate-pulse">処理中...</div>
+              )}
             </div>
          </div>
-         <div className="ml-8 border-l pl-8 border-slate-100 flex flex-col items-end gap-2"><div className="text-xs text-slate-400">Status</div>{isCompleted ? <Link href="/mypage" className="text-sm font-bold text-white bg-slate-800 px-4 py-2 rounded-lg hover:bg-slate-700 transition shadow-md">詳細レポートを見る</Link> : <div className="text-sm font-bold text-indigo-600 animate-pulse">処理中...</div>}</div>
       </div>
     );
   };
@@ -361,13 +455,13 @@ export default function DashboardPage() {
        <div className="p-6">
           <div className="flex justify-between items-start mb-4">
              <div>
-                <h4 className="font-bold text-lg text-slate-800 line-clamp-1">{pkg.name}</h4>
+                <h4 className="font-bold text-lg text-slate-800 line-clamp-1">{pkg.package_name}</h4>
                 {isRecommended && <span className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded border border-indigo-100 ml-2">High Match</span>}
                 <div className="flex flex-wrap gap-2 mt-2">{pkg.industry && pkg.industry.split(',').slice(0,2).map((t:string,i:number)=><span key={i} className="text-[10px] font-bold px-2 py-1 bg-slate-100 text-slate-500 rounded uppercase">#{t.trim()}</span>)}</div>
              </div>
              <span className="text-xs font-bold text-slate-400 bg-slate-50 px-2 py-1 rounded">READY</span>
           </div>
-          <div className="flex justify-between text-xs text-slate-500 mb-4 border-t border-slate-50 pt-4"><span>収録: {pkg.totalCountMaster}社</span><span>未着手</span></div>
+          <div className="flex justify-between text-xs text-slate-500 mb-4 border-t border-slate-50 pt-4"><span>収録: {pkg.total}社</span><span>未着手</span></div>
           <button onClick={() => handleClickStart(pkg)} className="w-full py-2 rounded-lg font-bold text-sm bg-slate-50 text-slate-600 hover:bg-slate-900 hover:text-white transition-colors">送信設定へ</button>
        </div>
     </div>
@@ -385,14 +479,21 @@ export default function DashboardPage() {
       </div>
 
       {queuePackages.length > 0 && (
-        <div className="mb-12"><h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2"><span className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse"></span> Form Submission Queue</h3><div className="space-y-4">{queuePackages.map(pkg => <QueueCard key={pkg.name} pkg={pkg} />)}</div></div>
+        <div className="mb-12">
+          <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+             <span className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse"></span> Form Submission Queue
+          </h3>
+          <div className="space-y-4">
+             {queuePackages.map((pkg, i) => <QueueCard key={`${pkg.package_name}-${i}`} pkg={pkg} />)}
+          </div>
+        </div>
       )}
 
       {/* Recommended Targets Section */}
       <div className="mb-12">
           <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Recommended Targets</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-            {recommendedPackages.length > 0 ? recommendedPackages.map(pkg => <PackageCard key={pkg.name} pkg={pkg} isRecommended={true} />) : <div className="text-slate-400 text-sm col-span-3">おすすめのターゲットが見つかりませんでした。</div>}
+            {recommendedPackages.length > 0 ? recommendedPackages.map((pkg, i) => <PackageCard key={`${pkg.package_name}-${i}`} pkg={pkg} isRecommended={true} />) : <div className="text-slate-400 text-sm col-span-3">おすすめのターゲットが見つかりませんでした。</div>}
           </div>
 
           <div className="flex gap-4">
@@ -412,12 +513,94 @@ export default function DashboardPage() {
         <div className="mb-12 animate-fadeInUp">
           <h3 className="text-sm font-bold text-indigo-600 uppercase tracking-widest mb-4 flex items-center gap-2">📂 Uploaded Target Lists</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {uploadedPackagesList.map(pkg => <PackageCard key={pkg.name} pkg={pkg} />)}
+            {uploadedPackagesList.map((pkg, i) => <PackageCard key={`${pkg.package_name}-${i}`} pkg={pkg} />)}
           </div>
         </div>
       )}
 
-      {/* ターゲット検索モーダル (レコメンドタグ付き) */}
+      {selectedReport && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col">
+            <div className="p-6 border-b flex justify-between items-center bg-gray-50">
+              <div>
+                <h3 className="text-xl font-bold text-gray-800">アプローチ完了レポート</h3>
+                <p className="text-sm text-gray-500 font-mono mt-1">{selectedReport.package_name}</p>
+              </div>
+              <button onClick={() => setSelectedReport(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={24} />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto">
+              <div className="grid grid-cols-3 gap-4 mb-8">
+                <div className="bg-blue-50 p-4 rounded-xl text-center border border-blue-100">
+                  <div className="text-3xl font-black text-blue-600">{selectedReport.total}</div>
+                  <div className="text-xs text-gray-500 font-bold uppercase mt-1">Total Targets</div>
+                </div>
+                <div className="bg-green-50 p-4 rounded-xl text-center border border-green-100">
+                  <div className="text-3xl font-black text-green-600">{selectedReport.success}</div>
+                  <div className="text-xs text-gray-500 font-bold uppercase mt-1">Success</div>
+                </div>
+                <div className={`p-4 rounded-xl text-center border ${selectedReport.error > 0 ? 'bg-red-50 border-red-100' : 'bg-gray-50 border-gray-100'}`}>
+                  <div className={`text-3xl font-black ${selectedReport.error > 0 ? 'text-red-600' : 'text-gray-400'}`}>{selectedReport.error}</div>
+                  <div className="text-xs text-gray-500 font-bold uppercase mt-1">Failed</div>
+                </div>
+              </div>
+
+              {selectedReport.error > 0 ? (
+                <div className="mb-6">
+                  <h4 className="font-bold text-gray-700 flex items-center gap-2 mb-3">
+                    <AlertCircle size={18} className="text-red-500" />
+                    送信失敗リスト
+                  </h4>
+                  <div className="bg-white rounded-lg border border-gray-200 overflow-hidden text-sm shadow-sm">
+                    <table className="w-full text-left">
+                      <thead className="bg-gray-50 text-gray-500 font-medium border-b">
+                        <tr>
+                          <th className="p-3 w-1/3">Company</th>
+                          <th className="p-3">Error Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {selectedReport.targets
+                          .filter(t => t.status === 'error')
+                          .map((target, i) => (
+                            <tr key={i} className="hover:bg-gray-50">
+                              <td className="p-3 align-top">
+                                <div className="font-bold text-gray-700">{target.company_name}</div>
+                                <a href={target.url} target="_blank" rel="noreferrer" className="text-xs text-indigo-400 hover:text-indigo-600 truncate block max-w-[200px] underline">
+                                   {target.url}
+                                </a>
+                              </td>
+                              <td className="p-3 text-red-600 text-xs font-mono bg-red-50/30">
+                                {target.result_log || "Unknown Error"}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                 <div className="text-center py-10 text-green-600 font-medium bg-green-50 rounded-lg border border-green-100 flex flex-col items-center gap-2">
+                    <CheckCircle size={40} className="mb-2" />
+                    <span>全件送信に成功しました！エラーはありません。</span>
+                 </div>
+              )}
+            </div>
+            
+            <div className="p-4 border-t bg-gray-50 flex justify-end">
+               <button 
+                 onClick={() => setSelectedReport(null)}
+                 className="bg-slate-800 text-white px-6 py-2 rounded-lg hover:bg-slate-900 transition-colors font-bold shadow-lg"
+               >
+                 閉じる
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isSearchModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[80vh] flex flex-col overflow-hidden">
@@ -443,18 +626,16 @@ export default function DashboardPage() {
               <div className="p-8 overflow-y-auto flex-1 bg-slate-50/50">
                  {searchQuery && searchResults.length === 0 && <div className="text-center text-slate-400 mt-10">条件に一致するターゲットが見つかりません</div>}
                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {searchResults.map(pkg => <PackageCard key={pkg.name} pkg={pkg} />)}
+                    {searchResults.map((pkg, i) => <PackageCard key={`${pkg.package_name}-${i}`} pkg={pkg} />)}
                  </div>
               </div>
            </div>
         </div>
       )}
 
-      {/* CSV/Excel アップロードモーダル */}
       {isUploadModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden relative">
-              
               {isAnalyzingCsv && (
                 <div className="absolute inset-0 bg-slate-900 z-50 flex flex-col items-center justify-center text-cyan-400 font-mono">
                    <div className="relative w-32 h-32 mb-8">
@@ -466,48 +647,22 @@ export default function DashboardPage() {
                    <div className="w-64 h-2 bg-slate-800 rounded-full mt-6 overflow-hidden"><div className="h-full bg-cyan-500 transition-all duration-100" style={{ width: `${progress}%` }}></div></div>
                 </div>
               )}
-
               <div className="px-8 py-6 border-b border-slate-100 flex justify-between items-center relative z-20 bg-white">
                  <h3 className="text-xl font-bold text-slate-800">ターゲットリストのアップロード</h3>
                  <button onClick={() => setIsUploadModalOpen(false)} className="text-3xl text-slate-400 hover:text-slate-600 cursor-pointer z-50 p-2 leading-none">×</button>
               </div>
-              
               <div className="p-10 text-center">
-                 <div 
-                    className={`border-2 border-dashed rounded-2xl p-10 transition-all ${uploadFile ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'}`}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => { e.preventDefault(); if(e.dataTransfer.files[0]) setUploadFile(e.dataTransfer.files[0]); }}
-                 >
+                 <div className={`border-2 border-dashed rounded-2xl p-10 transition-all ${uploadFile ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'}`} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); if(e.dataTransfer.files[0]) setUploadFile(e.dataTransfer.files[0]); }}>
                     <div className="text-4xl mb-4">📂</div>
-                    {uploadFile ? (
-                       <div>
-                          <p className="font-bold text-indigo-700">{uploadFile.name}</p>
-                          <p className="text-sm text-indigo-500 mt-1">{(uploadFile.size / 1024).toFixed(1)} KB</p>
-                       </div>
-                    ) : (
-                       <div>
-                          <p className="font-bold text-slate-600">CSVまたはExcelファイルをドラッグ＆ドロップ</p>
-                          <p className="text-sm text-slate-400 mt-2">またはクリックしてファイルを選択 (最大5MB)</p>
-                       </div>
-                    )}
-                    <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" 
-                        accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel" 
-                        onChange={(e) => e.target.files && setUploadFile(e.target.files[0])} />
+                    {uploadFile ? (<div><p className="font-bold text-indigo-700">{uploadFile.name}</p><p className="text-sm text-indigo-500 mt-1">{(uploadFile.size / 1024).toFixed(1)} KB</p></div>) : (<div><p className="font-bold text-slate-600">CSVまたはExcelファイルをドラッグ＆ドロップ</p><p className="text-sm text-slate-400 mt-2">またはクリックしてファイルを選択 (最大5MB)</p></div>)}
+                    <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel" onChange={(e) => e.target.files && setUploadFile(e.target.files[0])} />
                  </div>
-                 
-                 <button 
-                    disabled={!uploadFile}
-                    onClick={handleFileUpload}
-                    className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-xl font-bold shadow-lg hover:shadow-indigo-500/30 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                 >
-                    <span>🤖</span> AIで読み込み開始
-                 </button>
+                 <button disabled={!uploadFile} onClick={handleFileUpload} className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-xl font-bold shadow-lg hover:shadow-indigo-500/30 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"><span>🤖</span> AIで読み込み開始</button>
               </div>
            </div>
         </div>
       )}
 
-      {/* 確認モーダル & AIモーダル */}
       {isConfirmModalOpen && targetPackageForModal && editingProfile && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col relative">
@@ -515,11 +670,10 @@ export default function DashboardPage() {
               <div><h3 className="text-2xl font-bold text-slate-800">Review & Start</h3></div>
               <button onClick={() => setIsConfirmModalOpen(false)} className="text-2xl text-slate-300 hover:text-slate-600">×</button>
             </div>
-            
             <div className="p-8 overflow-y-auto flex-1 space-y-8">
                <div className="p-6 rounded-xl bg-slate-50 border border-slate-200">
                   <div className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Target Package</div>
-                  <div className="text-xl font-bold text-slate-800">{targetPackageForModal.name} <span className="text-sm font-normal text-slate-500 ml-2">({targetPackageForModal.totalCountMaster} companies)</span></div>
+                  <div className="text-xl font-bold text-slate-800">{targetPackageForModal.package_name} <span className="text-sm font-normal text-slate-500 ml-2">({targetPackageForModal.total} companies)</span></div>
                </div>
                
                <div className={`p-6 rounded-xl border transition-all ${isEditingInModal ? 'border-orange-200 ring-1 ring-orange-100 bg-orange-50/30' : 'border-slate-200'}`}>
@@ -576,7 +730,6 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* AI リライトモーダル */}
       {isRewriteModalOpen && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[60] flex items-center justify-center p-4">
            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl h-[80vh] flex flex-col relative overflow-hidden">
