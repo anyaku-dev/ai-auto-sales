@@ -1,9 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // タイムアウト設定を延長（Vercel Proなどを使う場合用）
+  // タイムアウト設定
   maxDuration: 60,
   
-  // ライブラリのバンドル設定（ここが重要！）
+  // ★ここが重要：最新ライブラリを動かす設定
   experimental: {
     serverComponentsExternalPackages: ['playwright-core', '@sparticuz/chromium'],
   },
