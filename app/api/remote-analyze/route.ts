@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { OpenAI } from 'openai';
-import { JSDOM } from 'jsdom';
+// ★変更点: jsdomをやめて、軽量なcheerioを使用
+import { load } from 'cheerio';
 
-// タイムアウトを最大に
 export const maxDuration = 60; 
 
 const openai = new OpenAI({
@@ -16,27 +16,29 @@ export async function POST(req: Request) {
 
     if (!htmlContent) return NextResponse.json({ error: 'No content' }, { status: 400 });
 
-    // --- 【改善点】HTMLのダイエット処理 ---
-    // scriptやstyleタグはAI分析に不要なので削除して、容量を空ける
+    // --- 【改善点】HTMLのダイエット処理 (Cheerio版) ---
     try {
-      const dom = new JSDOM(htmlContent);
-      const doc = dom.window.document;
-      const scripts = doc.querySelectorAll('script');
-      scripts.forEach(script => script.remove());
-      const styles = doc.querySelectorAll('style');
-      styles.forEach(style => style.remove());
-      const svgs = doc.querySelectorAll('svg');
-      svgs.forEach(svg => svg.remove());
+      // HTMLを読み込む
+      const $ = load(htmlContent);
+
+      // 不要なタグ（script, style, svg, noscript, iframe）を一括削除
+      $('script, style, svg, noscript, iframe, link, meta').remove();
       
-      // 整形後のHTMLを取得
-      htmlContent = doc.body.innerHTML;
+      // コメントアウトも削除（さらに軽量化）
+      $('*').contents().each(function() {
+          if (this.type === 'comment') $(this).remove();
+      });
+
+      // bodyの中身だけを取り出す（なければ全体）
+      const bodyContent = $('body').html();
+      if (bodyContent) {
+        htmlContent = bodyContent;
+      }
     } catch (e) {
       console.log("HTML parsing error, using raw content");
     }
 
-    // --- 【改善点】文字数制限を大幅緩和 ---
-    // 15,000 -> 100,000文字へ拡大（これでフォームまで届きます）
-    // ※VercelのPayload制限（4.5MB）には十分収まります
+    // 文字数制限（10万文字あれば十分です）
     const truncatedHtml = htmlContent.substring(0, 100000);
 
     const prompt = `
