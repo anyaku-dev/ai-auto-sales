@@ -60,24 +60,45 @@ export async function POST(req: Request) {
       try {
         const isProduction = process.env.NODE_ENV === "production";
         
-        // ★★★ Vercel用クラッシュ防止設定（追加部分） ★★★
         if (isProduction) {
-           chromium.setGraphicsMode = false; // グラフィック機能を無効化
+           chromium.setGraphicsMode = false;
         }
 
+        // ★★★ 1. ブラウザ起動設定（ブロック回避強化版） ★★★
         browser = await playwright.chromium.launch({
-          // ★変更点: クラッシュ回避のための引数を追加
           args: isProduction 
-            ? [...chromium.args, '--disable-gpu', '--disable-dev-shm-usage', '--disable-setuid-sandbox', '--no-sandbox'] 
+            ? [
+                ...chromium.args,
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-setuid-sandbox',
+                '--no-sandbox',
+                // ↓ここから追加：ロボットであることを隠す設定
+                '--hide-scrollbars',
+                '--disable-web-security',
+                '--disable-blink-features=AutomationControlled',
+              ] 
             : [],
           executablePath: isProduction 
             ? await chromium.executablePath() 
             : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
           headless: isProduction ? true : false, 
+          ignoreHTTPSErrors: true, // SSLエラー無視
         });
 
-        const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+        // ★★★ 2. 人間への偽装設定 ★★★
+        const context = await browser.newContext({ 
+            viewport: { width: 1280, height: 800 },
+            // 一般的なMacのChromeとして振る舞う
+            userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        });
+        
         const page = await context.newPage();
+        
+        // 自動化フラグ（navigator.webdriver）を消去する隠しコマンド
+        await page.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        });
         
         // タイムアウトを少し長めに設定
         await page.goto(target.url, { timeout: 25000, waitUntil: 'domcontentloaded' });
@@ -94,12 +115,11 @@ export async function POST(req: Request) {
            await page.fill(selectors.company_name, val).catch(()=>null);
         }
 
-        // 氏名入力ロジック（最新のAnalyzerの指示に従う）
+        // 氏名入力ロジック
         const lastName = profile.sender_last_name || '';
         const firstName = profile.sender_first_name || '';
         let nameDone = false;
 
-        // 1. 分割入力（最優先）
         if (selectors.last_name) {
           await page.fill(selectors.last_name, lastName).catch(()=>null);
           nameDone = true;
@@ -109,7 +129,6 @@ export async function POST(req: Request) {
           nameDone = true;
         }
 
-        // 2. 結合入力（保険：Analyzerがperson_nameしか返さなかった場合）
         if (!nameDone && selectors.person_name) {
           const fullName = `${lastName} ${firstName}`.trim(); 
           await page.fill(selectors.person_name, fullName).catch(()=>null);
@@ -138,7 +157,7 @@ export async function POST(req: Request) {
 
         await page.waitForTimeout(1500);
 
-        // ★★★ 2段階送信ロジック（ここが核心） ★★★
+        // ★★★ 3. 送信完了待機ロジック（ここを修正） ★★★
         let clickedFinalSubmit = false;
 
         // パターンA: 「確認画面へ」ボタンがある場合
@@ -150,39 +169,56 @@ export async function POST(req: Request) {
            await page.waitForTimeout(3000); 
            await page.waitForLoadState('domcontentloaded').catch(()=>null);
 
-           // 確認画面で「送信」ボタンを探す（AI分析ではなく、確実なキーワード検索で捉える）
+           // 確認画面で「送信」ボタンを探す
            const finalSubmitBtn = page.getByRole('button', { name: /送信|完了|Send|Submit|申|込/i }).first();
            
            if (await finalSubmitBtn.isVisible().catch(()=>false)) {
               console.log("Final submit button found on confirm page, clicking...");
-              await finalSubmitBtn.click();
+              
+              // クリックと同時に通信完了を待つ
+              await Promise.all([
+                page.waitForLoadState('networkidle').catch(() => {}),
+                finalSubmitBtn.click(),
+              ]);
+              // さらに念入りに10秒待つ
+              await page.waitForTimeout(10000);
+
               clickedFinalSubmit = true;
            } else {
               // ボタンが見つからない場合、念の為元のsubmit_buttonセレクタを再試行
               if (selectors.submit_button) {
-                 await page.click(selectors.submit_button).catch(()=>null);
+                 await Promise.all([
+                    page.waitForLoadState('networkidle').catch(() => {}),
+                    page.click(selectors.submit_button).catch(()=>null),
+                 ]);
+                 await page.waitForTimeout(10000);
                  clickedFinalSubmit = true;
               }
            }
         } 
-        // パターンB: 「送信」ボタンしかない場合（確認画面なし、またはAIがsubmitと判定）
+        // パターンB: 「送信」ボタンしかない場合
         else if (selectors.submit_button) {
            console.log("Submit button found, clicking...");
-           await page.click(selectors.submit_button);
            
-           // ★念のための2段構え★
-           // もし「送信」を押した後に確認モーダルなどが出て、もう一度「送信」が必要なケースへの対応
-           await page.waitForTimeout(3000);
+           // クリックと同時に通信完了を待つ
+           await Promise.all([
+             page.waitForLoadState('networkidle').catch(() => {}),
+             page.click(selectors.submit_button),
+           ]);
+           // さらに念入りに10秒待つ
+           await page.waitForTimeout(10000);
+           
+           // ★念のための2段構え（送信後にさらにモーダルが出る場合など）
            const confirmBtnAgain = page.getByRole('button', { name: /送信|完了|Send|Submit|OK/i }).first();
            if (await confirmBtnAgain.isVisible().catch(()=>false)) {
               console.log("Double check confirm button found, clicking...");
-              await confirmBtnAgain.click().catch(()=>null);
+              await Promise.all([
+                 page.waitForLoadState('networkidle').catch(() => {}),
+                 confirmBtnAgain.click().catch(()=>null),
+              ]);
+              await page.waitForTimeout(10000);
            }
            clickedFinalSubmit = true;
-        }
-
-        if (clickedFinalSubmit) {
-           await page.waitForTimeout(5000); // 送信完了待ち
         }
 
         success = true;
@@ -198,7 +234,6 @@ export async function POST(req: Request) {
     }
 
     if (success) {
-      // 成功処理
       await supabase.from('targets').update({ 
         status: 'completed', 
         result_log: JSON.stringify(resultLog),
