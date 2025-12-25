@@ -4,7 +4,6 @@ import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-// ★修正箇所: 正しいインポート文に直しました
 import { X, FileText, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 const supabase = createClient(
@@ -172,7 +171,7 @@ export default function DashboardPage() {
             processed: 0,
             success: 0, 
             error: 0, 
-            status: 'sending',
+            status: 'sending', // 初期値
             targets: [],
             progress: 0,
             industry: item.industry || ''
@@ -195,14 +194,12 @@ export default function DashboardPage() {
       const result = Object.values(grouped).map(group => {
          const total = group.total || group.targets.length || 1;
          
-         // ★★★ ロジック修正ポイント ★★★
-         // 「未処理(pending)」や「処理中(processing)」のタスクが1つも残っていなければ「完了」とみなす
-         // (数字がズレていても、残タスクがなければ完了にする強力なロジック)
+         // 判定ロジック
          const hasActiveTasks = group.targets.some(t => t.status === 'pending' || t.status === 'processing');
          
-         const status = !hasActiveTasks ? 'completed' : 'sending';
+         // ★修正点: ここで型を "completed" | "sending" に強制する（as ... を追加）
+         const status = (!hasActiveTasks ? 'completed' : 'sending') as "completed" | "sending";
          
-         // 完了なら強制的に100%表示にする（見た目を整える）
          const progress = status === 'completed' ? 100 : Math.round((group.processed / total) * 100);
 
          return { ...group, total, progress, status };
