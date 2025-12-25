@@ -58,12 +58,8 @@ export default function DashboardPage() {
   const [selectedReport, setSelectedReport] = useState<QueueGroup | null>(null);
 
   // --- Modal States ---
-  
-  // 確認・実行モーダル
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [targetPackageForModal, setTargetPackageForModal] = useState<any>(null);
-  
-  // プロフィール編集
   const [editingProfile, setEditingProfile] = useState<any>(null);
   const [isEditingInModal, setIsEditingInModal] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
@@ -72,11 +68,7 @@ export default function DashboardPage() {
   const [isRewriteModalOpen, setIsRewriteModalOpen] = useState(false);
   const [rewriteStep, setRewriteStep] = useState<'input' | 'result'>('input');
   const [rewriteInputs, setRewriteInputs] = useState({ 
-    productName: '', 
-    productUrl: '', 
-    targetType: '', 
-    coreValue: '', 
-    goal: '' 
+    productName: '', productUrl: '', targetType: '', coreValue: '', goal: '' 
   });
   const [generatedBody, setGeneratedBody] = useState('');
   const [refineInstruction, setRefineInstruction] = useState('');
@@ -109,10 +101,8 @@ export default function DashboardPage() {
     }
     if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') Notification.requestPermission();
     
-    // ★ここが修正点：データ自動更新（ポーリング）を追加
-    // 3秒ごとに最新状況を取得し、アプリ側の完了を画面に反映させます
+    // 自動更新（ポーリング）: 3秒ごとに最新状態をチェック
     const pollInterval = setInterval(() => {
-        // userステートがあるか、localStorageから取得できる場合のみ更新
         const currentUser = user || (localStorage.getItem('currentUser') ? JSON.parse(localStorage.getItem('currentUser')!) : null);
         if (currentUser?.userId) {
             fetchPackageStatus(currentUser.userId);
@@ -139,9 +129,9 @@ export default function DashboardPage() {
         if (intervalRef.current) clearInterval(intervalRef.current);
         clearInterval(pollInterval);
     };
-  }, [runningPackages]); // userを入れるとループする可能性があるため外しています
+  }, [runningPackages]); 
 
-  // AIローディングアニメーション
+  // AIアニメーション
   useEffect(() => {
     if (isAiGenerating || isAnalyzingCsv) {
       const texts = isAnalyzingCsv 
@@ -231,20 +221,32 @@ export default function DashboardPage() {
       });
 
       const result = Object.values(grouped).map(group => {
-         const total = group.total || group.targets.length || 1;
+         // ★修正ポイント: 判定ロジックを強化
          
-         // ステータス判定ロジック
-         const isProcessing = group.targets.some(t => t.status === 'processing' || t.status === 'queued');
-         const isCompleted = group.processed === total && total > 0;
-         
+         // 1. アクティブなタスク（まだ終わっていないもの）があるか？
+         const hasActiveTasks = group.targets.some(t => 
+            t.status === 'pending' || t.status === 'queued' || t.status === 'processing'
+         );
+
+         // 2. 全てが「pending（未着手）」の状態か？
+         const isAllPending = group.targets.every(t => t.status === 'pending');
+
          let status: "sending" | "completed" | "pending" = "pending";
          
-         if (isCompleted) {
-           status = "completed";
-         } else if (isProcessing || group.processed > 0) {
-           status = "sending";
+         if (!hasActiveTasks && group.processed > 0) {
+             // アクティブなものがなく、かつ1つでも処理済みなら「完了」とみなす
+             // (total数と合わなくても完了とする)
+             status = "completed";
+         } else if (hasActiveTasks && !isAllPending) {
+             // アクティブなものがあり、かつ全てが未着手でないなら「送信中」
+             status = "sending";
+         } else {
+             // それ以外（全て未着手、または空）は待機中
+             status = "pending";
          }
 
+         // 進捗率の計算（完了なら強制100%）
+         const total = group.total || group.targets.length || 1;
          const progress = status === 'completed' ? 100 : Math.round((group.processed / total) * 100);
 
          return { ...group, total, progress, status };
@@ -364,7 +366,7 @@ export default function DashboardPage() {
     setRunningPackages(prev => ({ ...prev, [pkgName]: true }));
     setTimers(prev => ({ ...prev, [pkgName]: { startTime: Date.now(), elapsed: '0m 0s' } }));
 
-    // アプリ版: APIを叩いてキューに入れる（ループして全件登録）
+    // アプリ版: APIを叩いてキューに入れる
     let queuedCount = 0;
     while (true) {
       try {
@@ -381,14 +383,12 @@ export default function DashboardPage() {
         
         if (result.success) {
             queuedCount++;
-            // 画面更新
-            if (user) fetchPackageStatus(user.userId);
+            if (user) fetchPackageStatus(user.userId); // 即座に反映
         }
 
         if (result.message && result.message.includes('ありません')) break; 
       } catch(e) { break; }
       
-      // 負荷軽減のため少し待つ
       await new Promise(r => setTimeout(r, 500));
     }
 
