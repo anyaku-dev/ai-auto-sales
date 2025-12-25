@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* 背景を真っ白ではなく、目に優しいSaaS風の薄いグレーに */
+  --background: #f8fafc; 
+  --foreground: #0f172a;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+/* 入力フォームのフォーカス時の枠線をかっこよくする */
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid #3b82f6; /* Blue-500 */
+  outline-offset: -1px;
+}
