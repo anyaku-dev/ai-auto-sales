@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { X, FileText, CheckCircle, AlertCircle, Loader2, Clock } from 'lucide-react';
+import { X, FileText, CheckCircle, AlertCircle, Loader2, Clock, RefreshCw } from 'lucide-react';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -14,7 +14,7 @@ const supabase = createClient(
 type Target = {
   id: string;
   company_name: string;
-  status: "pending" | "processing" | "completed" | "error";
+  status: "pending" | "queued" | "processing" | "completed" | "error";
   package_name: string;
   result_log: string;
   url: string;
@@ -24,7 +24,6 @@ type Target = {
   total_count?: number;
 };
 
-// ★修正1: status型に 'pending' を追加
 type QueueGroup = {
   package_name: string;
   total: number;
@@ -43,11 +42,13 @@ export default function DashboardPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
   
+  // データ管理
   const [profiles, setProfiles] = useState<any[]>([]);
   const [packages, setPackages] = useState<QueueGroup[]>([]);
   const [totalSentCount, setTotalSentCount] = useState(0);
   const [notifications, setNotifications] = useState<any[]>([]);
 
+  // 実行管理
   const [selectedProfileId, setSelectedProfileId] = useState('');
   const [runningPackages, setRunningPackages] = useState<{[key: string]: boolean}>({});
   const [timers, setTimers] = useState<{[key: string]: TimerData}>({});
@@ -56,27 +57,44 @@ export default function DashboardPage() {
   const [manualQueueNames, setManualQueueNames] = useState<string[]>([]);
   const [selectedReport, setSelectedReport] = useState<QueueGroup | null>(null);
 
-  // Modal States
+  // --- Modal States ---
+  
+  // 確認・実行モーダル
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [targetPackageForModal, setTargetPackageForModal] = useState<any>(null);
+  
+  // プロフィール編集
   const [editingProfile, setEditingProfile] = useState<any>(null);
   const [isEditingInModal, setIsEditingInModal] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
+  
+  // AI作成
   const [isRewriteModalOpen, setIsRewriteModalOpen] = useState(false);
   const [rewriteStep, setRewriteStep] = useState<'input' | 'result'>('input');
-  const [rewriteInputs, setRewriteInputs] = useState({ productName:'', productUrl:'', targetType:'', coreValue:'', goal:'' });
+  const [rewriteInputs, setRewriteInputs] = useState({ 
+    productName: '', 
+    productUrl: '', 
+    targetType: '', 
+    coreValue: '', 
+    goal: '' 
+  });
   const [generatedBody, setGeneratedBody] = useState('');
   const [refineInstruction, setRefineInstruction] = useState('');
   const [isAiGenerating, setIsAiGenerating] = useState(false);
+  
+  // その他UI
   const [loadingText, setLoadingText] = useState('INITIALIZING...');
   const [progress, setProgress] = useState(0);
 
+  // 検索・アップロード
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [isAnalyzingCsv, setIsAnalyzingCsv] = useState(false);
   const [uploadedPackageNames, setUploadedPackageNames] = useState<string[]>([]); 
+
+  // --- Effects ---
 
   useEffect(() => {
     const stored = localStorage.getItem('currentUser');
@@ -91,6 +109,17 @@ export default function DashboardPage() {
     }
     if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') Notification.requestPermission();
     
+    // ★ここが修正点：データ自動更新（ポーリング）を追加
+    // 3秒ごとに最新状況を取得し、アプリ側の完了を画面に反映させます
+    const pollInterval = setInterval(() => {
+        // userステートがあるか、localStorageから取得できる場合のみ更新
+        const currentUser = user || (localStorage.getItem('currentUser') ? JSON.parse(localStorage.getItem('currentUser')!) : null);
+        if (currentUser?.userId) {
+            fetchPackageStatus(currentUser.userId);
+        }
+    }, 3000);
+
+    // 経過時間タイマー
     intervalRef.current = setInterval(() => {
       setTimers(prev => {
         const next = { ...prev };
@@ -105,9 +134,14 @@ export default function DashboardPage() {
         return changed ? next : prev;
       });
     }, 1000);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [runningPackages]);
 
+    return () => { 
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        clearInterval(pollInterval);
+    };
+  }, [runningPackages]); // userを入れるとループする可能性があるため外しています
+
+  // AIローディングアニメーション
   useEffect(() => {
     if (isAiGenerating || isAnalyzingCsv) {
       const texts = isAnalyzingCsv 
@@ -119,6 +153,7 @@ export default function DashboardPage() {
     }
   }, [isAiGenerating, isAnalyzingCsv]);
 
+  // プログレスバーアニメーション
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isAiGenerating || isAnalyzingCsv) {
@@ -137,6 +172,8 @@ export default function DashboardPage() {
     }
     return () => { if(interval) clearInterval(interval); };
   }, [isAiGenerating, isAnalyzingCsv]);
+
+  // --- Data Fetching ---
 
   const loadAllData = async (userId: string) => {
     const { data: p } = await supabase.from('sender_profiles').select('*').eq('owner_id', userId).order('created_at', { ascending: false });
@@ -173,7 +210,7 @@ export default function DashboardPage() {
             processed: 0,
             success: 0, 
             error: 0, 
-            status: 'pending', // ★初期値をpendingに設定
+            status: 'pending',
             targets: [],
             progress: 0,
             industry: item.industry || ''
@@ -196,10 +233,8 @@ export default function DashboardPage() {
       const result = Object.values(grouped).map(group => {
          const total = group.total || group.targets.length || 1;
          
-         // ★修正2: 判定ロジックの厳密化
-         // 1つでも処理中があれば "sending"
-         const isProcessing = group.targets.some(t => t.status === 'processing');
-         // 全て完了していれば "completed"
+         // ステータス判定ロジック
+         const isProcessing = group.targets.some(t => t.status === 'processing' || t.status === 'queued');
          const isCompleted = group.processed === total && total > 0;
          
          let status: "sending" | "completed" | "pending" = "pending";
@@ -207,10 +242,8 @@ export default function DashboardPage() {
          if (isCompleted) {
            status = "completed";
          } else if (isProcessing || group.processed > 0) {
-           // 処理中がある、または一部完了している場合は "sending"
            status = "sending";
          }
-         // 上記以外（未処理かつ処理中もない）は "pending" のまま
 
          const progress = status === 'completed' ? 100 : Math.round((group.processed / total) * 100);
 
@@ -222,9 +255,10 @@ export default function DashboardPage() {
     }
   };
 
+  // --- Filtering & Selection ---
+
   const currentProfile = profiles.find(p => p.id === selectedProfileId);
 
-  // キュー表示: 進捗があるか、手動追加されたもの
   const queuePackages = packages.filter(p => p.progress > 0 || manualQueueNames.includes(p.package_name));
 
   const recommendedPackages = packages
@@ -252,6 +286,8 @@ export default function DashboardPage() {
     return list.length > 0 ? list.slice(0, 6) : ['IT', 'SaaS', '不動産', '建設', '東京都', '大阪府'];
   };
 
+  // --- Handlers ---
+
   const handleClickStart = (pkg: any) => {
     if (!currentProfile) return alert('商材を選択してください');
     setTargetPackageForModal(pkg); 
@@ -261,18 +297,13 @@ export default function DashboardPage() {
     setIsSearchModalOpen(false);
   };
 
-  // リストから削除（アーカイブ）
   const handleRemoveFromQueue = async (packageName: string) => {
-    // ローカルの表示リストから削除
     const newManual = manualQueueNames.filter(n => n !== packageName);
     setManualQueueNames(newManual);
     localStorage.setItem('manualQueueNames', JSON.stringify(newManual));
-    
-    // 画面再描画
-    loadAllData(user.userId);
+    if (user) loadAllData(user.userId);
   };
 
-  // 完全削除（アーカイブ）
   const handleArchive = async (packageName: string) => {
     if(!confirm("このレポートをダッシュボードから削除しますか？\n（データ自体は消えません）")) return;
 
@@ -284,14 +315,23 @@ export default function DashboardPage() {
     handleRemoveFromQueue(packageName);
   };
 
+  // --- Profile Edit Handlers ---
+
   const handleStartEditInModal = () => setIsEditingInModal(true);
+  
   const handleSaveEditInModal = async (closeEditMode = false) => {
     if (!editingProfile) return;
     setIsSavingProfile(true);
     const { error } = await supabase.from('sender_profiles').update(editingProfile).eq('id', editingProfile.id);
     setIsSavingProfile(false);
-    if (!error) { if (closeEditMode) setIsEditingInModal(false); loadAllData(user.userId); } else { alert('保存エラー: ' + error.message); }
+    if (!error) { 
+        if (closeEditMode) setIsEditingInModal(false); 
+        if (user) loadAllData(user.userId); 
+    } else { 
+        alert('保存エラー: ' + error.message); 
+    }
   };
+
   const handleDuplicateAndEdit = async () => {
     if (!editingProfile) return;
     if(!confirm('複製して編集しますか？')) return;
@@ -300,9 +340,16 @@ export default function DashboardPage() {
     newProfileData.profile_name = `${newProfileData.profile_name} (コピー)`;
     const { data, error } = await supabase.from('sender_profiles').insert(newProfileData).select().single();
     setIsSavingProfile(false);
-    if (!error && data) { await loadAllData(user.userId); setSelectedProfileId(data.id); setEditingProfile(data); setIsEditingInModal(true); }
+    if (!error && data) { 
+        if (user) await loadAllData(user.userId); 
+        setSelectedProfileId(data.id); 
+        setEditingProfile(data); 
+        setIsEditingInModal(true); 
+    }
   };
   
+  // --- Execution Handler ---
+
   const handleConfirmAndRun = async () => {
     if (!targetPackageForModal || !selectedProfileId) return;
     setIsConfirmModalOpen(false);
@@ -317,42 +364,46 @@ export default function DashboardPage() {
     setRunningPackages(prev => ({ ...prev, [pkgName]: true }));
     setTimers(prev => ({ ...prev, [pkgName]: { startTime: Date.now(), elapsed: '0m 0s' } }));
 
-    let successCount = 0;
-    let errorCount = 0;
-    const sentBodySnapshot = editingProfile.message_body;
-    const sentProfileName = editingProfile.profile_name;
-
+    // アプリ版: APIを叩いてキューに入れる（ループして全件登録）
+    let queuedCount = 0;
     while (true) {
       try {
         const res = await fetch('/api/process-queue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sender_profile_id: selectedProfileId, target_package_name: pkgName, owner_id: user.userId }),
+          body: JSON.stringify({ 
+              sender_profile_id: selectedProfileId, 
+              target_package_name: pkgName, 
+              owner_id: user.userId 
+          }),
         });
         const result = await res.json();
         
-        if (result.success) successCount++;
-        else if (result.success === false) errorCount++; 
-        
-        fetchPackageStatus(user.userId);
+        if (result.success) {
+            queuedCount++;
+            // 画面更新
+            if (user) fetchPackageStatus(user.userId);
+        }
 
-        if (result.message === 'No jobs found') break; 
+        if (result.message && result.message.includes('ありません')) break; 
       } catch(e) { break; }
       
-      await new Promise(r => setTimeout(r, 2000));
+      // 負荷軽減のため少し待つ
+      await new Promise(r => setTimeout(r, 500));
     }
 
     setRunningPackages(prev => ({ ...prev, [pkgName]: false }));
     
     await supabase.from('notifications').insert({ 
         owner_id: user.userId, 
-        title: 'アプローチ完了のお知らせ', 
-        message: `「${pkgName}」への営業が完了しました。クリックして詳細レポートを確認してください。`,
-        metadata: { packageName: pkgName, successCount, errorCount, totalCount: successCount + errorCount, industry: targetPackageForModal.industry, sentBody: sentBodySnapshot, profileName: sentProfileName } 
+        title: '送信キューに追加完了', 
+        message: `「${pkgName}」を送信キューに追加しました。PCアプリが順次処理します。`,
+        metadata: { packageName: pkgName } 
     });
-    fetchNotifications(user.userId);
-    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification('AI Auto Sales', { body: `「${pkgName}」への営業が完了しました！` });
+    if (user) fetchNotifications(user.userId);
   };
+
+  // --- Upload Handler ---
 
   const handleFileUpload = async () => {
     if (!uploadFile) return;
@@ -376,46 +427,118 @@ export default function DashboardPage() {
     setUploadFile(null);
     setUploadedPackageNames(prev => [newPkgName, ...prev]);
     alert('解析が完了しました！\n「アップロードしたターゲットリスト」に追加されました。');
-    loadAllData(user.userId);
+    if (user) loadAllData(user.userId);
   };
 
-  const handleCloseRewriteModal = () => { if (rewriteStep === 'result' && generatedBody.length > 0) { if (!confirm('AIが生成した文章は保存されていません。\n反映せずに閉じてもよろしいですか？')) return; } setIsRewriteModalOpen(false); };
+  // --- AI Handlers ---
+
+  const handleCloseRewriteModal = () => { 
+      if (rewriteStep === 'result' && generatedBody.length > 0) { 
+          if (!confirm('AIが生成した文章は保存されていません。\n反映せずに閉じてもよろしいですか？')) return; 
+      } 
+      setIsRewriteModalOpen(false); 
+  };
+
   const handleOpenRewriteModal = () => {
-    if (editingProfile.message_body && editingProfile.message_body.length > 20) { setGeneratedBody(editingProfile.message_body); setRewriteStep('result'); setRefineInstruction(''); } else { setRewriteStep('input'); setRewriteInputs({ productName: editingProfile.profile_name || '', productUrl: editingProfile.sender_url || '', targetType:'', coreValue:'', goal:'' }); setGeneratedBody(''); }
+    if (editingProfile.message_body && editingProfile.message_body.length > 20) { 
+        setGeneratedBody(editingProfile.message_body); 
+        setRewriteStep('result'); 
+        setRefineInstruction(''); 
+    } else { 
+        setRewriteStep('input'); 
+        setRewriteInputs({ 
+            productName: editingProfile.profile_name || '', 
+            productUrl: editingProfile.sender_url || '', 
+            targetType:'', 
+            coreValue:'', 
+            goal:'' 
+        }); 
+        setGeneratedBody(''); 
+    }
     if (!isEditingInModal) setIsEditingInModal(true);
     setIsRewriteModalOpen(true);
   };
-  const handleStartNewAi = () => { setRewriteStep('input'); setGeneratedBody(''); setRewriteInputs({ ...rewriteInputs, productName: editingProfile?.profile_name || '', productUrl: editingProfile?.sender_url || '' }); };
-  const streamText = async (text: string) => { setGeneratedBody(''); const chunkSize = 3; let current = 0; return new Promise<void>((resolve) => { const interval = setInterval(() => { if (current >= text.length) { clearInterval(interval); resolve(); return; } setGeneratedBody(prev => prev + text.slice(current, current + chunkSize)); current += chunkSize; }, 5); }); };
+
+  const handleStartNewAi = () => { 
+      setRewriteStep('input'); 
+      setGeneratedBody(''); 
+      setRewriteInputs({ 
+          ...rewriteInputs, 
+          productName: editingProfile?.profile_name || '', 
+          productUrl: editingProfile?.sender_url || '' 
+      }); 
+  };
+
+  const streamText = async (text: string) => { 
+      setGeneratedBody(''); 
+      const chunkSize = 3; 
+      let current = 0; 
+      return new Promise<void>((resolve) => { 
+          const interval = setInterval(() => { 
+              if (current >= text.length) { 
+                  clearInterval(interval); 
+                  resolve(); 
+                  return; 
+              } 
+              setGeneratedBody(prev => prev + text.slice(current, current + chunkSize)); 
+              current += chunkSize; 
+          }, 5); 
+      }); 
+  };
+
   const runAiGenerate = async (mode: 'draft' | 'refine') => {
     setIsAiGenerating(true);
     try {
-      const senderInfo = { company: editingProfile.sender_company, name: `${editingProfile.sender_last_name} ${editingProfile.sender_first_name}`, department: editingProfile.sender_department, url: editingProfile.sender_url };
-      const res = await fetch('/api/ai-rewrite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, inputs: rewriteInputs, senderInfo, currentText: generatedBody, refineInstruction }), });
+      const senderInfo = { 
+          company: editingProfile.sender_company, 
+          name: `${editingProfile.sender_last_name} ${editingProfile.sender_first_name}`, 
+          department: editingProfile.sender_department, 
+          url: editingProfile.sender_url 
+      };
+      const res = await fetch('/api/ai-rewrite', { 
+          method: 'POST', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify({ mode, inputs: rewriteInputs, senderInfo, currentText: generatedBody, refineInstruction }), 
+      });
       const data = await res.json();
       setIsAiGenerating(false);
-      if (data.resultText) { if (mode === 'draft') setRewriteStep('result'); setRefineInstruction(''); await streamText(data.resultText); }
-    } catch (e) { setIsAiGenerating(false); alert('通信エラー'); }
+      if (data.resultText) { 
+          if (mode === 'draft') setRewriteStep('result'); 
+          setRefineInstruction(''); 
+          await streamText(data.resultText); 
+      }
+    } catch (e) { 
+        setIsAiGenerating(false); 
+        alert('通信エラー'); 
+    }
   };
+
   const handleApplyGeneratedText = () => {
-    let body = generatedBody; let subject = editingProfile.subject_title;
-    if (generatedBody.includes('件名：') && generatedBody.includes('本文：')) { const subjectMatch = generatedBody.match(/件名：(.*?)\n/); if (subjectMatch) subject = subjectMatch[1].trim(); const bodyMatch = generatedBody.split('本文：')[1]; if (bodyMatch) body = bodyMatch.trim(); }
+    let body = generatedBody; 
+    let subject = editingProfile.subject_title;
+    if (generatedBody.includes('件名：') && generatedBody.includes('本文：')) { 
+        const subjectMatch = generatedBody.match(/件名：(.*?)\n/); 
+        if (subjectMatch) subject = subjectMatch[1].trim(); 
+        const bodyMatch = generatedBody.split('本文：')[1]; 
+        if (bodyMatch) body = bodyMatch.trim(); 
+    }
     setEditingProfile({ ...editingProfile, message_body: body, subject_title: subject });
     setIsRewriteModalOpen(false);
   };
 
+  // --- Components ---
+
   const QueueCard = ({ pkg }: { pkg: QueueGroup }) => {
     const isCompleted = pkg.status === 'completed';
-    const isPending = pkg.status === 'pending'; // ★追加: 待機中フラグ
+    const isPending = pkg.status === 'pending';
 
     return (
       <div className={`relative bg-white rounded-xl border p-6 shadow-sm transition-all ${
           isCompleted ? 'border-green-200 bg-green-50/30' : 
-          isPending ? 'border-slate-200 bg-slate-50' : // 待機中のスタイル（グレー）
-          'border-indigo-200 ring-1 ring-indigo-50' // 送信中のスタイル（青）
+          isPending ? 'border-slate-200 bg-slate-50' : 
+          'border-indigo-200 ring-1 ring-indigo-50'
         }`}>
          
-         {/* ★修正3: 完了済みに加えて、待機中(pending)も削除ボタンを表示 */}
          {(isCompleted || isPending) && (
            <button 
              onClick={() => handleRemoveFromQueue(pkg.package_name)} 
@@ -429,11 +552,11 @@ export default function DashboardPage() {
          <div className="flex items-center gap-6">
             <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl shadow-inner shrink-0 ${
                isCompleted ? 'bg-green-100 text-green-600' : 
-               isPending ? 'bg-slate-200 text-slate-500' : // 待機中はグレーのアイコン
+               isPending ? 'bg-slate-200 text-slate-500' : 
                'bg-indigo-100 text-indigo-600'
             }`}>
                {isCompleted ? <CheckCircle size={24} /> : 
-                isPending ? <Clock size={24} /> : // 待機中は時計アイコン
+                isPending ? <Clock size={24} /> : 
                 <Loader2 size={24} className="animate-spin" />
                }
             </div>
@@ -443,7 +566,7 @@ export default function DashboardPage() {
                  <h4 className="font-bold text-slate-800 truncate">{pkg.package_name}</h4>
                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${
                     isCompleted ? 'bg-green-100 text-green-700' : 
-                    isPending ? 'bg-slate-200 text-slate-600' : // 待機中のバッジ
+                    isPending ? 'bg-slate-200 text-slate-600' : 
                     'bg-indigo-100 text-indigo-700'
                  }`}>
                     {isCompleted ? 'COMPLETED' : isPending ? 'WAITING' : 'SENDING...'}
@@ -454,7 +577,7 @@ export default function DashboardPage() {
                  <div 
                    className={`h-full transition-all duration-1000 ${
                        isCompleted ? 'bg-green-500' : 
-                       isPending ? 'bg-slate-400' : // 待機中のバー
+                       isPending ? 'bg-slate-400' : 
                        'bg-indigo-500'
                    }`} 
                    style={{ width: `${pkg.progress}%` }}
@@ -498,7 +621,11 @@ export default function DashboardPage() {
              <div>
                 <h4 className="font-bold text-lg text-slate-800 line-clamp-1">{pkg.package_name}</h4>
                 {isRecommended && <span className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded border border-indigo-100 ml-2">High Match</span>}
-                <div className="flex flex-wrap gap-2 mt-2">{pkg.industry && pkg.industry.split(',').slice(0,2).map((t:string,i:number)=><span key={i} className="text-[10px] font-bold px-2 py-1 bg-slate-100 text-slate-500 rounded uppercase">#{t.trim()}</span>)}</div>
+                <div className="flex flex-wrap gap-2 mt-2">
+                    {pkg.industry && pkg.industry.split(',').slice(0,2).map((t:string,i:number)=>(
+                        <span key={i} className="text-[10px] font-bold px-2 py-1 bg-slate-100 text-slate-500 rounded uppercase">#{t.trim()}</span>
+                    ))}
+                </div>
              </div>
              <span className="text-xs font-bold text-slate-400 bg-slate-50 px-2 py-1 rounded">READY</span>
           </div>
@@ -508,14 +635,30 @@ export default function DashboardPage() {
     </div>
   );
 
+  // --- Main Render ---
+
   return (
     <div className="max-w-7xl mx-auto pb-20 relative font-sans">
       <div className="flex flex-col md:flex-row justify-between items-end mb-10 gap-6">
-        <div><h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Dashboard</h2><p className="text-sm text-slate-500 mt-1 font-medium">Welcome back, <span className="text-indigo-600">{user?.userName}</span>.</p></div>
+        <div>
+            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Dashboard</h2>
+            <p className="text-sm text-slate-500 mt-1 font-medium">Welcome back, <span className="text-indigo-600">{user?.userName}</span>.</p>
+        </div>
         <div className="flex flex-col md:flex-row gap-6 items-center bg-white p-4 rounded-xl shadow-sm border border-slate-200 relative">
             <Link href="/mypage" className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow-md hover:scale-110 transition">{notifications.length}</Link>
-          <div className="text-center px-4 border-r border-slate-100"><div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Sent</div><div className="text-2xl font-black text-slate-800">{totalSentCount.toLocaleString()}</div></div>
-          <div className="min-w-[250px]"><label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Active Profile</label><div className="relative"><select className="w-full bg-slate-50 border border-slate-200 text-slate-700 font-bold py-2 pl-4 pr-10 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm" value={selectedProfileId} onChange={e => setSelectedProfileId(e.target.value)}>{profiles.length === 0 && <option>商材が登録されていません</option>}{profiles.map(p => <option key={p.id} value={p.id}>{p.profile_name}</option>)}</select></div></div>
+          <div className="text-center px-4 border-r border-slate-100">
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Sent</div>
+              <div className="text-2xl font-black text-slate-800">{totalSentCount.toLocaleString()}</div>
+          </div>
+          <div className="min-w-[250px]">
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Active Profile</label>
+              <div className="relative">
+                  <select className="w-full bg-slate-50 border border-slate-200 text-slate-700 font-bold py-2 pl-4 pr-10 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm" value={selectedProfileId} onChange={e => setSelectedProfileId(e.target.value)}>
+                      {profiles.length === 0 && <option>商材が登録されていません</option>}
+                      {profiles.map(p => <option key={p.id} value={p.id}>{p.profile_name}</option>)}
+                  </select>
+              </div>
+          </div>
         </div>
       </div>
 
@@ -734,8 +877,14 @@ export default function DashboardPage() {
                   
                   <div className="space-y-4">
                     <div className="grid grid-cols-2 gap-4">
-                        <div><label className="block text-xs font-bold text-slate-500 uppercase">管理ネーム</label><input disabled={!isEditingInModal} className="w-full p-2 border rounded text-sm" value={editingProfile.profile_name} onChange={e=>setEditingProfile({...editingProfile, profile_name:e.target.value})} /></div>
-                        <div><label className="block text-xs font-bold text-slate-500 uppercase">企業URL</label><input disabled={!isEditingInModal} className="w-full p-2 border rounded text-sm" value={editingProfile.sender_url} onChange={e=>setEditingProfile({...editingProfile, sender_url:e.target.value})} /></div>
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase">管理ネーム</label>
+                            <input disabled={!isEditingInModal} className="w-full p-2 border rounded text-sm" value={editingProfile.profile_name} onChange={e=>setEditingProfile({...editingProfile, profile_name:e.target.value})} />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase">企業URL</label>
+                            <input disabled={!isEditingInModal} className="w-full p-2 border rounded text-sm" value={editingProfile.sender_url} onChange={e=>setEditingProfile({...editingProfile, sender_url:e.target.value})} />
+                        </div>
                     </div>
                     <div className="grid grid-cols-3 gap-4">
                        <div><label className="block text-xs font-bold text-slate-500 uppercase">会社名</label><input disabled={!isEditingInModal} className="w-full p-2 border rounded text-sm" value={editingProfile.sender_company} onChange={e=>setEditingProfile({...editingProfile, sender_company:e.target.value})} /></div>
