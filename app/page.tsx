@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { X, FileText, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { X, FileText, CheckCircle, AlertCircle, Loader2, Clock } from 'lucide-react';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,15 +21,17 @@ type Target = {
   industry?: string;
   location?: string;
   created_at: string;
+  total_count?: number;
 };
 
+// ★修正1: status型に 'pending' を追加
 type QueueGroup = {
   package_name: string;
   total: number;
   processed: number;
   success: number;
   error: number;
-  status: "sending" | "completed";
+  status: "sending" | "completed" | "pending";
   targets: Target[];
   progress: number;
   industry: string;
@@ -171,7 +173,7 @@ export default function DashboardPage() {
             processed: 0,
             success: 0, 
             error: 0, 
-            status: 'sending', // 初期値
+            status: 'pending', // ★初期値をpendingに設定
             targets: [],
             progress: 0,
             industry: item.industry || ''
@@ -194,12 +196,22 @@ export default function DashboardPage() {
       const result = Object.values(grouped).map(group => {
          const total = group.total || group.targets.length || 1;
          
-         // 判定ロジック
-         const hasActiveTasks = group.targets.some(t => t.status === 'pending' || t.status === 'processing');
+         // ★修正2: 判定ロジックの厳密化
+         // 1つでも処理中があれば "sending"
+         const isProcessing = group.targets.some(t => t.status === 'processing');
+         // 全て完了していれば "completed"
+         const isCompleted = group.processed === total && total > 0;
          
-         // ★修正点: ここで型を "completed" | "sending" に強制する（as ... を追加）
-         const status = (!hasActiveTasks ? 'completed' : 'sending') as "completed" | "sending";
+         let status: "sending" | "completed" | "pending" = "pending";
          
+         if (isCompleted) {
+           status = "completed";
+         } else if (isProcessing || group.processed > 0) {
+           // 処理中がある、または一部完了している場合は "sending"
+           status = "sending";
+         }
+         // 上記以外（未処理かつ処理中もない）は "pending" のまま
+
          const progress = status === 'completed' ? 100 : Math.round((group.processed / total) * 100);
 
          return { ...group, total, progress, status };
@@ -249,6 +261,18 @@ export default function DashboardPage() {
     setIsSearchModalOpen(false);
   };
 
+  // リストから削除（アーカイブ）
+  const handleRemoveFromQueue = async (packageName: string) => {
+    // ローカルの表示リストから削除
+    const newManual = manualQueueNames.filter(n => n !== packageName);
+    setManualQueueNames(newManual);
+    localStorage.setItem('manualQueueNames', JSON.stringify(newManual));
+    
+    // 画面再描画
+    loadAllData(user.userId);
+  };
+
+  // 完全削除（アーカイブ）
   const handleArchive = async (packageName: string) => {
     if(!confirm("このレポートをダッシュボードから削除しますか？\n（データ自体は消えません）")) return;
 
@@ -256,12 +280,8 @@ export default function DashboardPage() {
       .from("targets")
       .update({ is_archived: true })
       .eq("package_name", packageName);
-
-    const newManual = manualQueueNames.filter(n => n !== packageName);
-    setManualQueueNames(newManual);
-    localStorage.setItem('manualQueueNames', JSON.stringify(newManual));
-
-    loadAllData(user.userId);
+    
+    handleRemoveFromQueue(packageName);
   };
 
   const handleStartEditInModal = () => setIsEditingInModal(true);
@@ -386,12 +406,19 @@ export default function DashboardPage() {
 
   const QueueCard = ({ pkg }: { pkg: QueueGroup }) => {
     const isCompleted = pkg.status === 'completed';
+    const isPending = pkg.status === 'pending'; // ★追加: 待機中フラグ
+
     return (
-      <div className={`relative bg-white rounded-xl border p-6 shadow-sm transition-all ${isCompleted ? 'border-green-200 bg-green-50/30' : 'border-indigo-200 ring-1 ring-indigo-50'}`}>
+      <div className={`relative bg-white rounded-xl border p-6 shadow-sm transition-all ${
+          isCompleted ? 'border-green-200 bg-green-50/30' : 
+          isPending ? 'border-slate-200 bg-slate-50' : // 待機中のスタイル（グレー）
+          'border-indigo-200 ring-1 ring-indigo-50' // 送信中のスタイル（青）
+        }`}>
          
-         {isCompleted && (
+         {/* ★修正3: 完了済みに加えて、待機中(pending)も削除ボタンを表示 */}
+         {(isCompleted || isPending) && (
            <button 
-             onClick={() => handleArchive(pkg.package_name)} 
+             onClick={() => handleRemoveFromQueue(pkg.package_name)} 
              className="absolute top-3 right-3 text-gray-400 hover:text-red-500 bg-white/80 hover:bg-white p-1 rounded-full transition-colors"
              title="一覧から削除"
            >
@@ -400,21 +427,36 @@ export default function DashboardPage() {
          )}
 
          <div className="flex items-center gap-6">
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl shadow-inner shrink-0 ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-indigo-100 text-indigo-600'}`}>
-               {isCompleted ? <CheckCircle size={24} /> : <Loader2 size={24} className="animate-spin" />}
+            <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl shadow-inner shrink-0 ${
+               isCompleted ? 'bg-green-100 text-green-600' : 
+               isPending ? 'bg-slate-200 text-slate-500' : // 待機中はグレーのアイコン
+               'bg-indigo-100 text-indigo-600'
+            }`}>
+               {isCompleted ? <CheckCircle size={24} /> : 
+                isPending ? <Clock size={24} /> : // 待機中は時計アイコン
+                <Loader2 size={24} className="animate-spin" />
+               }
             </div>
             
             <div className="flex-1 min-w-0">
                <div className="flex items-center gap-3 mb-1">
                  <h4 className="font-bold text-slate-800 truncate">{pkg.package_name}</h4>
-                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${isCompleted ? 'bg-green-100 text-green-700' : 'bg-indigo-100 text-indigo-700'}`}>
-                    {isCompleted ? 'COMPLETED' : 'SENDING...'}
+                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${
+                    isCompleted ? 'bg-green-100 text-green-700' : 
+                    isPending ? 'bg-slate-200 text-slate-600' : // 待機中のバッジ
+                    'bg-indigo-100 text-indigo-700'
+                 }`}>
+                    {isCompleted ? 'COMPLETED' : isPending ? 'WAITING' : 'SENDING...'}
                  </span>
                </div>
                
                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
                  <div 
-                   className={`h-full transition-all duration-1000 ${isCompleted ? 'bg-green-500' : 'bg-indigo-500'}`} 
+                   className={`h-full transition-all duration-1000 ${
+                       isCompleted ? 'bg-green-500' : 
+                       isPending ? 'bg-slate-400' : // 待機中のバー
+                       'bg-indigo-500'
+                   }`} 
                    style={{ width: `${pkg.progress}%` }}
                  ></div>
                </div>
@@ -438,6 +480,8 @@ export default function DashboardPage() {
                   <FileText size={14} />
                   詳細
                 </button>
+              ) : isPending ? (
+                  <div className="text-sm font-bold text-slate-400">待機中...</div>
               ) : (
                 <div className="text-sm font-bold text-indigo-600 animate-pulse">処理中...</div>
               )}
