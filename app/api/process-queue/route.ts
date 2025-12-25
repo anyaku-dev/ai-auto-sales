@@ -59,8 +59,17 @@ export async function POST(req: Request) {
       
       try {
         const isProduction = process.env.NODE_ENV === "production";
+        
+        // ★★★ Vercel用クラッシュ防止設定（追加部分） ★★★
+        if (isProduction) {
+           chromium.setGraphicsMode = false; // グラフィック機能を無効化
+        }
+
         browser = await playwright.chromium.launch({
-          args: isProduction ? chromium.args : [],
+          // ★変更点: クラッシュ回避のための引数を追加
+          args: isProduction 
+            ? [...chromium.args, '--disable-gpu', '--disable-dev-shm-usage', '--disable-setuid-sandbox', '--no-sandbox'] 
+            : [],
           executablePath: isProduction 
             ? await chromium.executablePath() 
             : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
