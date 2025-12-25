@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
 import { OpenAI } from 'openai';
-// ★変更点: node-html-parser を使用
 import { parse } from 'node-html-parser';
 
 export const maxDuration = 60; 
-// Vercelでの動的実行を強制
 export const dynamic = 'force-dynamic';
 
 const openai = new OpenAI({
@@ -18,19 +16,16 @@ export async function POST(req: Request) {
 
     if (!htmlContent) return NextResponse.json({ error: 'No content' }, { status: 400 });
 
-    // --- 【改善点】HTMLのダイエット処理 (node-html-parser版) ---
+    // --- HTMLのダイエット処理 ---
     try {
-      // HTMLをパース（解析）
       const root = parse(htmlContent);
 
-      // 不要なタグを一括削除
       const tagsToRemove = ['script', 'style', 'svg', 'noscript', 'iframe', 'link', 'meta', 'header', 'footer'];
       tagsToRemove.forEach(tag => {
         const elements = root.querySelectorAll(tag);
         elements.forEach(el => el.remove());
       });
 
-      // HTMLを取得（bodyがあればbodyの中身、なければ全体）
       const bodyEl = root.querySelector('body');
       if (bodyEl) {
         htmlContent = bodyEl.innerHTML;
@@ -41,27 +36,41 @@ export async function POST(req: Request) {
       console.log("HTML parsing error, using raw content");
     }
 
-    // 文字数制限（10万文字あれば十分です）
     const truncatedHtml = htmlContent.substring(0, 100000);
 
+    // ★修正ポイント：お問い合わせ種別の判別ロジックを追加
     const prompt = `
     あなたはHTML解析のプロです。
     提供されたHTMLから、お問い合わせフォームの入力要素に対応するCSSセレクタを特定してください。
     
-    必ずHTML内に【実在する】属性（id, name, classなど）を使用してください。
-    推測で一般的なID（#emailなど）を回答しないでください。
-    見つからない場合は null を返してください。
+    特に「お問い合わせ種別（Category/Type）」がある場合、
+    「業務提携」「法人」「ビジネス」「その他」など、営業提案として最も適切な選択肢を選んでください。
+
+    【ルール】
+    1. 必ずHTML内に【実在する】属性（id, name, classなど）を使用してください。
+    2. 推測で一般的なIDを回答しないでください。
+    3. 見つからない場合は null を返してください。
+
+    【お問い合わせ種別（inquiry_category）の特別ルール】
+    - プルダウン(<select>)の場合: selectorに<select>タグのセレクタ、valueに選択すべき<option>のvalue属性値を入れてください。
+    - ラジオボタン(<input type="radio">)の場合: selectorに「クリックすべき特定の<input>」のセレクタを入れてください（valueはnullでOK）。
 
     必要なフィールド:
     company_name, person_name, last_name, first_name, email, phone_number,
     department_name, subject_title, body, company_url, agreement_checkbox,
-    confirm_button, submit_button
+    confirm_button, submit_button,
+    inquiry_category_selector, inquiry_category_value
 
     HTML:
     ${truncatedHtml}
 
     回答形式（JSONのみ）:
-    { "company_name": "...", "email": null, ... }
+    { 
+      "company_name": "...", 
+      "inquiry_category_selector": "select[name='type']",
+      "inquiry_category_value": "business_partnership", 
+      ... 
+    }
     `;
 
     const completion = await openai.chat.completions.create({
