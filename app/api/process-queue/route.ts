@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import chromium from '@sparticuz/chromium';
-import playwright from 'playwright-core';
-import { analyzeForm } from '../../../lib/ai-analyzer';
 
+// Vercelでの実行設定（タイムアウト等は既存の設定を維持）
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
@@ -13,232 +11,56 @@ const supabase = createClient(
 );
 
 export async function POST(req: Request) {
-  let target = null;
-  let browser = null;
-
   try {
     const body = await req.json();
-    const { sender_profile_id, target_package_name, owner_id } = body;
+    // 必要な情報を受け取る
+    const { owner_id, target_package_name } = body;
 
-    if (!sender_profile_id || !owner_id) {
+    // バリデーション
+    if (!owner_id) {
       return NextResponse.json({ message: '認証エラー: IDが不足しています' }, { status: 400 });
     }
 
-    // 1. ターゲット取得
+    // 1. 「pending（待機中）」のタスクを1つ探す
+    // ※Vercel上ではブラウザを起動せず、対象を見つけるだけに留めます
     let query = supabase.from('targets')
       .select('*')
       .eq('status', 'pending')
       .eq('owner_id', owner_id);
 
-    if (target_package_name) query = query.eq('package_name', target_package_name);
+    if (target_package_name) {
+        query = query.eq('package_name', target_package_name);
+    }
     
-    const { data, error } = await query.limit(1).single();
-    target = data;
+    // 古い順（作成順）に1つ取得して、実行順序を守ります
+    const { data: target, error } = await query.order('created_at', { ascending: true }).limit(1).single();
 
-    if (error || !target) return NextResponse.json({ message: 'No jobs found' });
-
-    // 2. プロフィール取得
-    const { data: profile } = await supabase
-      .from('sender_profiles')
-      .select('*')
-      .eq('id', sender_profile_id)
-      .eq('owner_id', owner_id)
-      .single();
-
-    if (!profile) return NextResponse.json({ error: 'Profile not found' }, { status: 400 });
-
-    await supabase.from('targets').update({ status: 'processing' }).eq('id', target.id);
-
-    const MAX_RETRIES = 3;
-    let success = false;
-    let lastError = '';
-    let resultLog = {};
-
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      console.log(`Attempt ${attempt}/${MAX_RETRIES}: ${target.url}`);
-      
-      try {
-        const isProduction = process.env.NODE_ENV === "production";
-        
-        if (isProduction) {
-           chromium.setGraphicsMode = false;
-        }
-
-        // ★★★ ブラウザ起動設定（Vercel対策済み） ★★★
-        browser = await playwright.chromium.launch({
-          args: isProduction 
-            ? [
-                ...chromium.args,
-                '--disable-gpu',
-                '--disable-dev-shm-usage',
-                '--disable-setuid-sandbox',
-                '--no-sandbox',
-                '--hide-scrollbars',
-                '--disable-web-security',
-                '--disable-blink-features=AutomationControlled',
-              ] 
-            : [],
-          executablePath: isProduction 
-            ? await chromium.executablePath() 
-            : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-          headless: isProduction ? true : false, 
-        });
-
-        const context = await browser.newContext({ 
-            viewport: { width: 1280, height: 800 },
-            userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            ignoreHTTPSErrors: true, // SSLエラー無視
-        });
-        
-        const page = await context.newPage();
-        
-        // ロボット判定回避
-        await page.addInitScript(() => {
-          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        });
-        
-        await page.goto(target.url, { timeout: 25000, waitUntil: 'domcontentloaded' });
-
-        const content = await page.content();
-        const selectors = await analyzeForm(content);
-        console.log("Selectors:", selectors);
-        
-        // --- 入力実行 ---
-        
-        // 会社名
-        if (selectors.company_name) {
-           const val = profile.sender_company || target.company_name || '個人';
-           await page.fill(selectors.company_name, val).catch(()=>null);
-        }
-
-        // 氏名入力（分割・結合ロジック維持）
-        const lastName = profile.sender_last_name || '';
-        const firstName = profile.sender_first_name || '';
-        let nameDone = false;
-
-        if (selectors.last_name) {
-          await page.fill(selectors.last_name, lastName).catch(()=>null);
-          nameDone = true;
-        }
-        if (selectors.first_name) {
-          await page.fill(selectors.first_name, firstName).catch(()=>null);
-          nameDone = true;
-        }
-        if (!nameDone && selectors.person_name) {
-          const fullName = `${lastName} ${firstName}`.trim(); 
-          await page.fill(selectors.person_name, fullName).catch(()=>null);
-        }
-
-        // その他項目
-        if (selectors.department_name && profile.sender_department) {
-           await page.fill(selectors.department_name, profile.sender_department).catch(()=>null);
-        }
-        if (selectors.phone_number && profile.phone_number) await page.fill(selectors.phone_number, profile.phone_number).catch(()=>null);
-        if (selectors.email && profile.sender_email) await page.fill(selectors.email, profile.sender_email).catch(()=>null);
-        if (selectors.company_url && profile.sender_url) {
-           await page.fill(selectors.company_url, profile.sender_url).catch(()=>null);
-        }
-        if (selectors.subject_title && profile.subject_title) {
-           await page.fill(selectors.subject_title, profile.subject_title).catch(()=>null);
-        }
-        if (selectors.body && profile.message_body) await page.fill(selectors.body, profile.message_body).catch(()=>null);
-
-        // 同意チェック
-        if (selectors.agreement_checkbox) {
-          await page.check(selectors.agreement_checkbox).catch(async () => {
-            await page.click(selectors.agreement_checkbox).catch(()=>null);
-          });
-        }
-
-        await page.waitForTimeout(1500);
-
-        // ★★★ 送信完了待機ロジック（確認画面対応も維持） ★★★
-        let clickedFinalSubmit = false;
-
-        if (selectors.confirm_button) {
-           console.log("Confirm button found, clicking...");
-           await page.click(selectors.confirm_button);
-           
-           await page.waitForTimeout(3000); 
-           await page.waitForLoadState('domcontentloaded').catch(()=>null);
-
-           // 確認画面で「送信」を探す
-           const finalSubmitBtn = page.getByRole('button', { name: /送信|完了|Send|Submit|申|込/i }).first();
-           
-           if (await finalSubmitBtn.isVisible().catch(()=>false)) {
-              console.log("Final submit button found on confirm page, clicking...");
-              await Promise.all([
-                page.waitForLoadState('networkidle').catch(() => {}),
-                finalSubmitBtn.click(),
-              ]);
-              await page.waitForTimeout(10000); // 10秒待機
-              clickedFinalSubmit = true;
-           } else {
-              // 見つからない場合は元のボタンを試す
-              if (selectors.submit_button) {
-                 await Promise.all([
-                    page.waitForLoadState('networkidle').catch(() => {}),
-                    page.click(selectors.submit_button).catch(()=>null),
-                 ]);
-                 await page.waitForTimeout(10000); // 10秒待機
-                 clickedFinalSubmit = true;
-              }
-           }
-        } 
-        else if (selectors.submit_button) {
-           // 確認画面なしで直接送信
-           console.log("Submit button found, clicking...");
-           await Promise.all([
-             page.waitForLoadState('networkidle').catch(() => {}),
-             page.click(selectors.submit_button),
-           ]);
-           await page.waitForTimeout(10000); // 10秒待機
-           
-           // 送信後に確認モーダルが出るパターンのケア
-           const confirmBtnAgain = page.getByRole('button', { name: /送信|完了|Send|Submit|OK/i }).first();
-           if (await confirmBtnAgain.isVisible().catch(()=>false)) {
-              console.log("Double check confirm button found, clicking...");
-              await Promise.all([
-                 page.waitForLoadState('networkidle').catch(() => {}),
-                 confirmBtnAgain.click().catch(()=>null),
-              ]);
-              await page.waitForTimeout(10000);
-           }
-           clickedFinalSubmit = true;
-        }
-
-        success = true;
-        resultLog = { selectors, used_profile: profile.profile_name, attempts: attempt };
-        await browser.close();
-        break; 
-
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        lastError = err.message;
-        if (browser) await browser.close();
-      }
+    if (error || !target) {
+      return NextResponse.json({ message: '送信待機中のリストはありません' });
     }
 
-    if (success) {
-      await supabase.from('targets').update({ 
-        status: 'completed', 
-        result_log: JSON.stringify(resultLog),
-        completed_at: new Date().toISOString()
-      }).eq('id', target.id);
+    // 2. ステータスを「queued（送信指令待ち）」に変更する
+    // ★ここが修正のキモです：
+    // ブラウザ操作は行わず、ステータスを変えることで、
+    // 待機しているPC版の worker.ts に「これ処理して！」と合図を送ります。
+    const { error: updateError } = await supabase
+      .from('targets')
+      .update({ status: 'queued' })
+      .eq('id', target.id);
 
-      return NextResponse.json({ success: true, target_url: target.url, profile_used: profile.profile_name });
-    } else {
-      await supabase.from('targets').update({ 
-        status: 'error', 
-        result_log: `Failed after ${MAX_RETRIES} attempts. Last error: ${lastError}` 
-      }).eq('id', target.id);
-      return NextResponse.json({ success: false, error: lastError });
+    if (updateError) {
+      throw updateError;
     }
+
+    // 3. 成功レスポンス
+    return NextResponse.json({ 
+      success: true, 
+      message: '送信キューに追加しました。PCのロボットが処理を開始します。',
+      target_url: target.url 
+    });
 
   } catch (e: any) {
-    if (target) {
-        await supabase.from('targets').update({ status: 'error', result_log: e.message }).eq('id', target.id);
-    }
+    console.error('API Error:', e.message);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
