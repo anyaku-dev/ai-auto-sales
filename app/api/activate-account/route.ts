@@ -11,57 +11,50 @@ export async function POST(req: Request) {
     const { email, password } = await req.json();
     console.log(`🚀 アカウント有効化リクエスト開始: ${email}`);
 
-    // 1. 決済ステータスを最終確認
+    // 1. まず profiles テーブルに決済済みのデータがあるか確認
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
-      .select('status, id')
+      .select('status')
       .eq('email', email)
       .single();
 
     if (profileError || !profile || profile.status !== 'active') {
-      console.error('❌ 決済未完了エラー:', profileError || `status is ${profile?.status}`);
-      return NextResponse.json({ 
-        error: '決済が完了していないか、有効なユーザーではありません。' 
-      }, { status: 403 });
+      console.error('❌ 決済未完了:', profileError || 'status not active');
+      return NextResponse.json({ error: '決済が確認できません。' }, { status: 403 });
     }
 
-    console.log('✅ ステータス確認完了(active). Authユーザーを作成します...');
-
-    // 2. Authユーザーを作成（管理者権限で実行）
+    // 2. Authユーザーを作成
+    // ここで一旦 profiles との自動連携による衝突を避けるため、createUserを実行
     const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
-      email_confirm: true // 決済済みなのでメール確認をスキップ
+      email_confirm: true
     });
 
     if (authError) {
-      // ここでエラーが出る主な原因: すでに同じメールアドレスのユーザーが存在する
-      console.error('❌ Authユーザー作成失敗:', JSON.stringify(authError, null, 2));
-      return NextResponse.json({ 
-        error: `Database error creating new user: ${authError.message}` 
-      }, { status: 500 });
+      console.error('❌ Auth作成失敗:', authError.message);
+      return NextResponse.json({ error: authError.message }, { status: 500 });
     }
 
-    console.log(`✅ Authユーザー作成成功: ${authUser.user.id}`);
-
-    // 3. ProfilesテーブルのIDを、新しく作成されたAuthユーザーのIDで更新
-    // これを行わないと、ログイン後に自分のプロフィールを取得できません
+    // 3. 決済情報（profiles）を、作成された本物のAuth IDに紐付ける
+    // これが「既存の行を上書き更新」する形になるので、エラーを回避できます
     const { error: updateError } = await supabaseAdmin
       .from('profiles')
-      .update({ id: authUser.user.id })
+      .update({ 
+        id: authUser.user.id,
+        updated_at: new Date().toISOString()
+      })
       .eq('email', email);
 
     if (updateError) {
-      console.error('❌ ProfilesのID更新失敗:', JSON.stringify(updateError, null, 2));
-      // Authユーザーは既に作成されているため、ここでは500を返さずログに留めます
-    } else {
-      console.log('✅ ProfilesテーブルのID同期完了');
+      console.error('❌ profilesのID同期失敗:', updateError.message);
     }
 
+    console.log(`✅ アカウント有効化完了: ${email}`);
     return NextResponse.json({ success: true });
 
   } catch (e: any) {
-    console.error('❌ 重大なシステムエラー:', e.message);
+    console.error('❌ システムエラー:', e.message);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
