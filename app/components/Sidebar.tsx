@@ -1,108 +1,128 @@
 'use client';
+
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-// ★修正ポイント：usePathname を追加
 import { useRouter, usePathname } from 'next/navigation';
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from '../../lib/supabase'; // 接続を統一
+import { LayoutDashboard, User, LogOut, ShieldCheck, CreditCard } from 'lucide-react';
 
 export default function Sidebar() {
   const router = useRouter();
-  // ★修正ポイント：現在のパスをリアルタイムで取得
   const pathname = usePathname();
-  const [user, setUser] = useState<any>(null);
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
+  const [profile, setProfile] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const checkUser = () => {
-      const stored = localStorage.getItem('currentUser');
-      if (!stored) {
-        // ★修正ポイント：判定に pathname を使用
-        if (pathname !== '/login') {
-             router.push('/login');
+    const fetchProfile = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (!session) {
+        // ログイン・登録関連のページ以外ならログインへ飛ばす
+        if (pathname !== '/login' && pathname !== '/signup' && pathname !== '/signup/complete') {
+          router.push('/login');
         }
-      } else {
-        setUser(JSON.parse(stored));
+        setLoading(false);
+        return;
       }
+
+      // Profilesテーブルから情報を取得
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', session.user.id)
+        .single();
+
+      if (!error && data) {
+        setProfile(data);
+      }
+      setLoading(false);
     };
+
+    fetchProfile();
     
-    // 初回実行
-    checkUser();
+    // 認証状態の変化を監視
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        router.push('/login');
+      }
+    });
 
-    window.addEventListener('storage', checkUser);
-    // ログイン画面から送られてくる「更新合図」をキャッチ
-    window.addEventListener('userUpdated', checkUser);
-
-    return () => {
-      window.removeEventListener('storage', checkUser);
-      window.removeEventListener('userUpdated', checkUser);
-    };
-  }, [router, pathname]); // pathnameが変わるたびにもチェック
+    return () => subscription.unsubscribe();
+  }, [router, pathname]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    localStorage.removeItem('currentUser');
     router.push('/login');
   };
 
-  // ★修正ポイント：ここも pathname で判定（より確実になります）
-  if (pathname === '/login') return null;
+  const menuItems = [
+    { name: 'ダッシュボード', icon: <LayoutDashboard size={20} />, href: '/mypage' },
+    { name: 'アカウント設定', icon: <User size={20} />, href: '/settings' },
+    { name: 'プラン・決済', icon: <CreditCard size={20} />, href: '/billing' },
+  ];
 
   return (
-    <div className="w-64 bg-slate-900 text-slate-300 min-h-screen flex flex-col border-r border-slate-800 shadow-xl z-10 flex-shrink-0 sticky top-0 h-screen">
-      <div className="h-16 flex items-center px-6 border-b border-slate-800 bg-slate-950">
-        <div className="font-bold text-xl text-white tracking-tight flex items-center gap-2">
-          <span className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white text-sm shadow-lg shadow-blue-900/50">AI</span>
-          Auto Sales
+    <aside className="w-72 h-screen bg-[#0F172A] text-slate-300 flex flex-col border-r border-slate-800 shadow-2xl">
+      {/* ロゴエリア */}
+      <div className="p-8 mb-4">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <ShieldCheck className="text-white" size={20} />
+          </div>
+          <span className="text-xl font-bold text-white tracking-tight">AI Auto Sales</span>
         </div>
       </div>
-      
-      <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
-        <p className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Menu</p>
-        
-        <Link href="/" className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 hover:text-white transition-colors group">
-          <span className="group-hover:text-blue-400 transition-colors">📊</span>
-          <span className="font-medium">ダッシュボード</span>
-        </Link>
-        <Link href="/profiles" className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 hover:text-white transition-colors group">
-          <span className="group-hover:text-green-400 transition-colors">📝</span>
-          <span className="font-medium">商材・本文設定</span>
-        </Link>
-        <Link href="/targets" className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 hover:text-white transition-colors group">
-          <span className="group-hover:text-yellow-400 transition-colors">📋</span>
-          <span className="font-medium">ターゲット管理</span>
-        </Link>
-        <Link href="/mypage" className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 hover:text-white transition-colors group">
-          <span className="group-hover:text-purple-400 transition-colors">👤</span>
-          <span className="font-medium">マイページ</span>
-        </Link>
+
+      {/* メニュー */}
+      <nav className="flex-1 px-4 space-y-1">
+        {menuItems.map((item) => {
+          const isActive = pathname === item.href;
+          return (
+            <Link
+              key={item.name}
+              href={item.href}
+              className={`flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all duration-200 group ${
+                isActive 
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' 
+                : 'hover:bg-slate-800/50 hover:text-white'
+              }`}
+            >
+              <span className={`${isActive ? 'text-white' : 'text-slate-400 group-hover:text-indigo-400'} transition-colors`}>
+                {item.icon}
+              </span>
+              <span className="font-semibold text-[15px]">{item.name}</span>
+            </Link>
+          );
+        })}
       </nav>
 
-      <div className="p-4 border-t border-slate-800 bg-slate-950">
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-10 h-10 rounded-full bg-slate-700 overflow-hidden flex-shrink-0 border border-slate-600 shadow-md">
-            {user?.avatarUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={user.avatarUrl} alt="User" className="w-full h-full object-cover" />
-            ) : (
-              <div className="w-full h-full bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center text-xs text-white font-bold">
-                {user?.userName?.slice(0, 1).toUpperCase() || 'U'}
-              </div>
-            )}
+      {/* ユーザープロフィール */}
+      <div className="p-4 mx-4 mb-8 bg-slate-800/40 border border-slate-700/50 rounded-2xl">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-white font-bold border-2 border-slate-700">
+            {profile?.email?.slice(0, 1).toUpperCase() || 'U'}
           </div>
-          
           <div className="overflow-hidden">
-            <p className="text-sm font-bold text-white truncate">{user?.userName || 'Guest'}</p>
-            <p className="text-xs text-slate-500 truncate">{user?.companyName || 'Free Plan'}</p>
+            <p className="text-sm font-bold text-white truncate leading-none mb-1.5">
+              {profile?.email?.split('@')[0]}
+            </p>
+            <div className="flex items-center gap-1.5">
+              <span className="flex w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                {profile?.status === 'active' ? 'Permanent License' : 'Trial Plan'}
+              </span>
+            </div>
           </div>
         </div>
-        <button onClick={handleLogout} className="w-full text-xs text-slate-400 hover:text-white bg-slate-800 hover:bg-red-600 py-2 rounded transition-colors">
+        
+        <button
+          onClick={handleLogout}
+          className="w-full py-2.5 flex items-center justify-center gap-2 text-xs font-bold text-slate-400 hover:text-white hover:bg-slate-700/50 rounded-lg transition-all border border-transparent hover:border-slate-600"
+        >
+          <LogOut size={14} />
           ログアウト
         </button>
       </div>
-    </div>
+    </aside>
   );
 }

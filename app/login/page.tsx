@@ -3,7 +3,7 @@
 import { useState, useEffect, Suspense } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Loader2, CheckCircle2, ArrowRight } from 'lucide-react';
+import { Loader2, CheckCircle2, ArrowRight, AlertCircle } from 'lucide-react';
 import ConfettiEffect from '../components/ConfettiEffect';
 
 function LoginForm() {
@@ -13,25 +13,27 @@ function LoginForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [showConfetti, setShowConfetti] = useState(false);
 
-  // URLパラメータから「有効化直後」かどうかを判定
   const isActivated = searchParams.get('message') === 'activated';
 
-  // 初回レンダリング時に有効化済みなら花吹雪フラグを立てる
   useEffect(() => {
     if (isActivated) {
       setShowConfetti(true);
     }
   }, [isActivated]);
 
+  // ログイン処理
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
+    setMessage(null);
 
-    const { error: authError } = await supabase.auth.signInWithPassword({
+    const { data, error: authError } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
@@ -39,18 +41,40 @@ function LoginForm() {
     if (authError) {
       setError('メールアドレスまたはパスワードが正しくありません。');
       setLoading(false);
-    } else {
-      // ログイン成功後、マイページへ
+    } else if (data.session) {
+      console.log('✅ ログイン成功');
+      // ログイン成功後、キャッシュをクリアしてマイページへ
+      router.refresh();
       router.push('/mypage');
     }
   };
 
+  // パスワードリセット処理
+  const handleResetPassword = async () => {
+    if (!email) {
+      setError('パスワードをリセットするには、先にメールアドレスを入力してください。');
+      return;
+    }
+
+    setResetLoading(true);
+    setError('');
+    
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/login/reset-password`,
+    });
+
+    if (resetError) {
+      setError(`エラー: ${resetError.message}`);
+    } else {
+      setMessage({ type: 'success', text: 'パスワード再設定用のメールを送信しました。メールボックスを確認してください。' });
+    }
+    setResetLoading(false);
+  };
+
   return (
     <div className="w-full max-w-[440px] px-6">
-      {/* 有効化直後のみ花吹雪を実行 */}
       {showConfetti && <ConfettiEffect onComplete={() => setShowConfetti(false)} />}
 
-      {/* 祝賀・案内メッセージ */}
       {isActivated && (
         <div className="mb-8 p-6 bg-emerald-50 border border-emerald-100 rounded-3xl flex items-start gap-4 animate-in fade-in slide-in-from-top-4 duration-1000">
           <div className="bg-emerald-500 rounded-full p-1 mt-0.5">
@@ -66,8 +90,16 @@ function LoginForm() {
         </div>
       )}
 
+      {message && (
+        <div className={`mb-8 p-6 rounded-3xl flex items-start gap-4 ${message.type === 'success' ? 'bg-blue-50 border border-blue-100' : 'bg-red-50 border border-red-100'}`}>
+          <CheckCircle2 className={message.type === 'success' ? 'text-blue-500' : 'text-red-500'} size={20} />
+          <p className={`text-sm font-medium ${message.type === 'success' ? 'text-blue-800' : 'text-red-800'}`}>
+            {message.text}
+          </p>
+        </div>
+      )}
+
       <div className="bg-white border border-slate-200 rounded-[32px] p-10 md:p-12 shadow-sm relative overflow-hidden">
-        {/* 装飾用の薄いアクセント */}
         <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
 
         <div className="mb-10">
@@ -97,8 +129,13 @@ function LoginForm() {
               <label className="text-[12px] font-bold text-slate-400 uppercase tracking-[0.1em]">
                 パスワード
               </label>
-              <button type="button" className="text-indigo-600 text-[12px] font-bold hover:underline">
-                パスワードを忘れた
+              <button 
+                type="button" 
+                onClick={handleResetPassword}
+                disabled={resetLoading}
+                className="text-indigo-600 text-[12px] font-bold hover:underline disabled:opacity-50"
+              >
+                {resetLoading ? '送信中...' : 'パスワードを忘れた'}
               </button>
             </div>
             <input
@@ -107,13 +144,14 @@ function LoginForm() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
-              className="w-full h-14 px-5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all"
+              className="w-full h-14 px-5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all font-medium text-slate-900"
             />
           </div>
 
           {error && (
-            <div className="p-4 bg-red-50 border border-red-100 rounded-2xl animate-shake">
-              <p className="text-red-600 text-sm font-bold text-center">
+            <div className="p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3">
+              <AlertCircle className="text-red-500 shrink-0" size={18} />
+              <p className="text-red-600 text-sm font-bold">
                 {error}
               </p>
             </div>
@@ -138,7 +176,10 @@ function LoginForm() {
       <div className="mt-10 text-center">
         <p className="text-slate-400 text-sm font-medium">
           まだアカウントをお持ちでないですか？<br />
-          <button className="text-slate-900 font-bold mt-2 hover:underline tracking-tight">
+          <button 
+            onClick={() => router.push('/signup')}
+            className="text-slate-900 font-bold mt-2 hover:underline tracking-tight"
+          >
             新規登録（仮登録）へ
           </button>
         </p>

@@ -1,9 +1,9 @@
-'use client'; // routerを使うために追加
+'use client';
 
 import { Noto_Sans_JP } from "next/font/google";
 import "./globals.css";
 import Sidebar from "./components/Sidebar";
-import { usePathname } from "next/navigation"; // 追加
+import { usePathname } from "next/navigation";
 
 const notoSansJP = Noto_Sans_JP({ 
   subsets: ["latin"],
@@ -17,7 +17,7 @@ export default function RootLayout({
 }>) {
   const pathname = usePathname();
 
-  // サイドバーを表示させないパスのリスト
+  // ログイン・登録画面ではサイドバーを隠す
   const noSidebarPages = ["/login", "/signup", "/signup/complete"];
   const isNoSidebarPage = noSidebarPages.includes(pathname);
 
@@ -25,16 +25,16 @@ export default function RootLayout({
     <html lang="ja">
       <body className={notoSansJP.className}>
         {isNoSidebarPage ? (
-          // ログイン・登録画面：サイドバーなし、全画面表示
-          <div className="min-h-screen">
+          <main className="min-h-screen bg-[#F8FAFC]">
             {children}
-          </div>
+          </main>
         ) : (
-          // 管理画面：サイドバーあり
           <div className="flex min-h-screen bg-slate-50">
             <Sidebar />
             <main className="flex-1 p-8 overflow-y-auto h-screen">
-              {children}
+              <div className="max-w-7xl mx-auto">
+                {children}
+              </div>
             </main>
           </div>
         )}
