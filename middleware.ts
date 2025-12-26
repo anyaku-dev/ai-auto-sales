@@ -1,4 +1,4 @@
-// 既存の記述の末尾に「/dist」などを足さず、再入力してみてください
+// @ts-ignore
 import { createMiddlewareClient } from '@supabase/auth-helpers-nextjs';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
