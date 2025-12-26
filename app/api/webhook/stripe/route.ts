@@ -2,15 +2,15 @@ import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 
+// Stripe初期化（最新バージョンに対応）
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  // typescriptのエラーを回避するため、キャストするか最新を記述します
   apiVersion: '2025-12-15.clover' as any,
 });
 
-// サービスロールキー（管理権限）を使用してSupabaseを初期化
+// 管理権限キーを使用してSupabaseAdminを初期化
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // ★重要：必ずサーバー専用のService Role Keyを使ってください
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // ★重要：VercelのEnvironment Variablesに設定が必要
 );
 
 export async function POST(req: Request) {
@@ -20,41 +20,51 @@ export async function POST(req: Request) {
   let event: Stripe.Event;
 
   try {
+    // Webhookの正当性を検証（署名チェック）
     event = stripe.webhooks.constructEvent(
       body,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET! // Stripe管理画面で取得する秘密鍵
+      process.env.STRIPE_WEBHOOK_SECRET!
     );
   } catch (err: any) {
+    console.error(`❌ Webhook Signature Error: ${err.message}`);
     return NextResponse.json({ error: `Webhook Error: ${err.message}` }, { status: 400 });
   }
 
-  // 支払い完了イベントをキャッチ
+  // 1. 決済完了イベント（checkout.session.completed）をキャッチ
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object as Stripe.Checkout.Session;
-    const customerEmail = session.metadata?.email;
+    
+    // metadataまたはcustomer_detailsからメールアドレスを抽出
+    const customerEmail = session.metadata?.email || session.customer_details?.email;
 
     if (customerEmail) {
-      // 1. Supabase Authでユーザーが存在するか確認
-      // (仮登録時にユーザーが作成されている、または新規作成するロジック)
-      
-      // 2. profilesテーブルのステータスを 'active' に更新
+      console.log(`🔔 決済成功通知を受信: ${customerEmail}`);
+
+      // 2. profilesテーブルへのUpsert（なければ作成、あれば更新）
+      // これにより、仮登録時にデータがなくても、決済完了時に確実にDBへ保存されます
       const { error } = await supabaseAdmin
         .from('profiles')
-        .update({ 
-          status: 'active',
-          stripe_customer_id: session.customer as string 
-        })
-        .eq('email', customerEmail);
+        .upsert({ 
+          email: customerEmail,
+          status: 'active', // ステータスを「有効」に
+          stripe_customer_id: session.customer as string,
+          updated_at: new Date().toISOString()
+        }, { 
+          onConflict: 'email' // emailが重複した場合は既存の行を更新する
+        });
 
       if (error) {
-        console.error('Supabase update error:', error);
-        return NextResponse.json({ error: 'DB Update Failed' }, { status: 500 });
+        console.error('❌ Supabase Upsert Error:', error);
+        return NextResponse.json({ error: 'Database update failed' }, { status: 500 });
       }
-      
-      console.log(`User ${customerEmail} is now active.`);
+
+      console.log(`✅ ユーザー ${customerEmail} を有効化しました。`);
+    } else {
+      console.error('❌ セッションにメールアドレスが含まれていません。');
     }
   }
 
-  return NextResponse.json({ received: true });
+  // Stripeに対して「無事に受け取った」ことを報告（200 OK）
+  return NextResponse.json({ received: true }, { status: 200 });
 }
